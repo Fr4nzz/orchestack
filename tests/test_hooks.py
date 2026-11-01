@@ -246,3 +246,20 @@ def test_gate_allows_on_invalid_config(tmp_path):
     event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {}}
     p, _ = run(MEMORY_GATE, json.dumps(event), {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi)})
     assert p.returncode == 0 and p.stdout == ""
+
+
+def test_precommit_uses_external_pattern_file(tmp_path):
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for rel in (".githooks/pre-commit", "scripts/scrub_check.sh", "scripts/lint.sh"):
+        dst = repo / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((REPO / rel).read_bytes())
+        dst.chmod(0o755)
+    (repo / "note.md").write_text("mentions secretproject here\n")
+    pats = tmp_path / "patterns.txt"
+    pats.write_text("secretproject\n")
+    subprocess.run(["git", "-C", str(repo), "add", "note.md"], check=True)
+    env = {**os.environ, "ORCHESTACK_SCRUB_PATTERNS": str(pats)}
+    p = subprocess.run([str(repo / ".githooks/pre-commit")], cwd=repo, env=env, capture_output=True, text=True)
+    assert p.returncode != 0 and "secretproject" in p.stdout

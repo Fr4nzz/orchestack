@@ -11,6 +11,7 @@ trap 'rm -r -- "$snap"' EXIT
 git checkout-index --prefix="$snap/" -- "${staged[@]}"
 mkdir -p "$snap/scripts"
 cp scripts/scrub_check.sh "$snap/scripts/"
-[[ -f .scrub-patterns.local ]] && cp .scrub-patterns.local "$snap/"
+patterns=${ORCHESTACK_SCRUB_PATTERNS:-$PWD/.scrub-patterns.local}   # resolve before entering the snapshot
+if [[ -f $patterns ]]; then cp -- "$patterns" "$snap/.scrub-patterns.local"; fi
 (cd "$snap" && ORCHESTACK_SCRUB_PATTERNS="$snap/.scrub-patterns.local" scripts/scrub_check.sh "${staged[@]}")
 scripts/lint.sh
