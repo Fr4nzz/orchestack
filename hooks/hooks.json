@@ -10,7 +10,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Agent|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch",
+        "matcher": "^(Agent|Task|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch)$",
         "hooks": [
           {"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_gate.py\"", "timeout": 5}
         ]

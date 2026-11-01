@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 # install.sh: install orchestack for Claude Code and Codex from this checkout.
 #
-#   scripts/install.sh [--dry-run] [--uninstall] [--keep-old]
+#   scripts/install.sh [--dry-run] [--uninstall] [--retire=NAME[,NAME...]]
 #
 # 1. Symlinks each skills/<name> into ~/.claude/skills and ~/.codex/skills. An existing folder or foreign symlink
 #    of the same name is moved (never deleted) to ~/.local/share/orchestack/backups/<ts>/<root>/<name>.bak-<ts>.
 #    Backups go outside the skill folders because agents load every SKILL.md they find there, backups included.
-# 2. Moves superseded skills (orchestrator-playbook, dual-critic-loop) to the same backup folder. --keep-old skips.
+# 2. --retire=NAME,... also moves your own older skills of those names to the same backup folder (off by default).
 # 3. Merges the hook registrations (hooks/hooks.json) into ~/.claude/settings.json after a timestamped backup.
 # 4. Adds one line to ~/.claude/CLAUDE.md if it is not there yet (after a timestamped backup).
 # --uninstall removes our symlinks, hook registrations and CLAUDE.md line, and restores the newest backup of each
 # skill name if its slot is empty. --dry-run prints every step and changes nothing.
 set -Eeuo pipefail
 
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TS=$(date +%Y%m%d-%H%M%S)
-DRY=0 UNINSTALL=0 RETIRE=1
+DRY=0 UNINSTALL=0
+SUPERSEDED=()
 for a in "$@"; do
   case $a in
     --dry-run) DRY=1 ;;
     --uninstall) UNINSTALL=1 ;;
-    --keep-old) RETIRE=0 ;;
+    --retire=*) IFS=, read -r -a SUPERSEDED <<< "${a#--retire=}" ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
 
 ROOTS=("$HOME/.claude/skills" "$HOME/.codex/skills")
-SUPERSEDED=(orchestrator-playbook dual-critic-loop)
 BACKUP_BASE="$HOME/.local/share/orchestack/backups"
 BACKUP="$BACKUP_BASE/$TS"
 SETTINGS="$HOME/.claude/settings.json"
@@ -43,7 +43,7 @@ backup() {  # path
   dst="$BACKUP/$(label "$src")/$(basename "$src").bak-$TS"
   run mkdir -p "$(dirname "$dst")"
   run mv -- "$src" "$dst"
-  say "backed up $src -> $dst"
+  (( DRY )) || say "backed up $src -> $dst"
 }
 
 newest_backup() {  # root-label name
@@ -57,7 +57,7 @@ for s in "$REPO"/skills/*/; do skills+=("$(basename "$s")"); done
 
 if (( UNINSTALL )); then
   for root in "${ROOTS[@]}"; do
-    for name in "${skills[@]}" "${SUPERSEDED[@]}"; do
+    for name in "${skills[@]}" ${SUPERSEDED[@]+"${SUPERSEDED[@]}"}; do
       dst=$root/$name
       if [[ -L $dst && $(readlink "$dst") == "$REPO/skills/$name" ]]; then
         run unlink -- "$dst"; say "unlinked $dst"
@@ -74,8 +74,8 @@ if (( UNINSTALL )); then
       python3 -I "$REPO/scripts/merge_settings.py" "$SETTINGS" "$REPO/hooks/hooks.json" "$REPO" --uninstall --dry-run
     else
       python3 -I "$REPO/scripts/merge_settings.py" "$SETTINGS" "$REPO/hooks/hooks.json" "$REPO" --uninstall
+      say "removed orchestack hooks from $SETTINGS"
     fi
-    say "removed orchestack hooks from $SETTINGS"
   fi
   if [[ -f $CLAUDE_MD ]] && grep -qxF -- "$LINE" "$CLAUDE_MD"; then
     run cp -p -- "$CLAUDE_MD" "$CLAUDE_MD.bak-orchestack-$TS"
@@ -84,8 +84,9 @@ if (( UNINSTALL )); then
       python3 -I - "$CLAUDE_MD" "$LINE" <<'PY'
 import sys
 path, line = sys.argv[1], sys.argv[2]
-lines = open(path, encoding="utf-8").read().split("\n")
-open(path, "w", encoding="utf-8").write("\n".join(l for l in lines if l != line))
+text = open(path, encoding="utf-8").read()
+text = text.replace("\n" + line + "\n", "\n").replace(line + "\n", "").replace(line, "")
+open(path, "w", encoding="utf-8").write(text)
 PY
       say "removed the orchestack line from $CLAUDE_MD"
     fi
@@ -102,11 +103,9 @@ for root in "${ROOTS[@]}"; do
     if [[ -e $dst || -L $dst ]]; then backup "$dst"; fi
     run ln -s -- "$src" "$dst"; say "linked   $dst -> $src"
   done
-  if (( RETIRE )); then
-    for name in "${SUPERSEDED[@]}"; do
-      if [[ -e $root/$name || -L $root/$name ]]; then backup "$root/$name"; fi
-    done
-  fi
+  for name in ${SUPERSEDED[@]+"${SUPERSEDED[@]}"}; do
+    if [[ -e $root/$name || -L $root/$name ]]; then backup "$root/$name"; fi
+  done
 done
 
 mkdir_settings_dir() { [[ -d $(dirname "$SETTINGS") ]] || run mkdir -p "$(dirname "$SETTINGS")"; }

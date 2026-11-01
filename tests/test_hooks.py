@@ -143,7 +143,7 @@ def test_gate_denies_below_default_threshold(tmp_path):
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
     assert "free RAM 2.0 GiB < 3.0" in hso["permissionDecisionReason"]
-    assert "wait for a child to finish or free memory" in hso["permissionDecisionReason"].lower()
+    assert "do not sleep-poll" in hso["permissionDecisionReason"].lower()
 
 
 def test_gate_threshold_from_config(tmp_path):
@@ -198,7 +198,7 @@ def test_merge_keeps_existing_and_is_idempotent(tmp_path):
     pre = d["hooks"]["PreToolUse"]
     assert pre[0] == other and len(pre) == 2
     assert str(REPO / "hooks" / "memory_gate.py") in pre[1]["hooks"][0]["command"]
-    assert pre[1]["matcher"] == "Agent|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch"
+    assert pre[1]["matcher"] == "^(Agent|Task|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch)$"
     assert d["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|compact"
     assert "${CLAUDE_PLUGIN_ROOT}" not in s.read_text()
     merge(s, "--uninstall")
@@ -211,3 +211,38 @@ def test_merge_dry_run_writes_nothing(tmp_path):
     s.write_text('{"model": "x"}')
     out = merge(s, "--dry-run").stdout
     assert "role_card.py" in out and s.read_text() == '{"model": "x"}'
+
+
+def test_merge_uninstall_keeps_sibling_hooks_in_a_shared_group(tmp_path):
+    s = tmp_path / "settings.json"
+    merge(s)
+    d = json.loads(s.read_text())
+    sibling = {"type": "command", "command": "echo mine"}
+    d["hooks"]["SessionStart"][0]["hooks"].append(sibling)
+    s.write_text(json.dumps(d))
+    merge(s, "--uninstall")
+    d = json.loads(s.read_text())
+    assert d["hooks"]["SessionStart"] == [{"matcher": "startup|resume|compact", "hooks": [sibling]}]
+    assert "PreToolUse" not in d["hooks"]
+
+
+def test_merge_writes_through_symlink_and_keeps_mode(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text('{"model": "x"}')
+    real.chmod(0o600)
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+    merge(link)
+    assert link.is_symlink() and "role_card.py" in real.read_text()
+    assert (real.stat().st_mode & 0o777) == 0o600
+
+
+def test_gate_allows_on_invalid_config(tmp_path):
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    (cdir / "config.json").write_text("{not json")
+    mi = tmp_path / "meminfo"
+    mi.write_text(MEMINFO.format(avail=1 * GIB, swap=0))
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {}}
+    p, _ = run(MEMORY_GATE, json.dumps(event), {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi)})
+    assert p.returncode == 0 and p.stdout == ""

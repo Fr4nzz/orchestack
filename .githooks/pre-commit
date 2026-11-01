@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # pre-commit: block commits that fail the privacy scrub or lint.
 # Enable once per clone: git config core.hooksPath .githooks
+# The scrub runs on the staged (index) versions, not the working tree, so what is checked is what gets committed.
 set -Eeuo pipefail
 cd "$(git rev-parse --show-toplevel)"
 mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
 (( ${#staged[@]} )) || exit 0
-scripts/scrub_check.sh "${staged[@]}"
+snap=$(mktemp -d "${TMPDIR:-/tmp}/orchestack-precommit.XXXXXX")
+trap 'rm -r -- "$snap"' EXIT
+git checkout-index --prefix="$snap/" -- "${staged[@]}"
+mkdir -p "$snap/scripts"
+cp scripts/scrub_check.sh "$snap/scripts/"
+[[ -f .scrub-patterns.local ]] && cp .scrub-patterns.local "$snap/"
+(cd "$snap" && ORCHESTACK_SCRUB_PATTERNS="$snap/.scrub-patterns.local" scripts/scrub_check.sh "${staged[@]}")
 scripts/lint.sh

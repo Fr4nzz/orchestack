@@ -20,13 +20,21 @@ GIB_KB = 1024 * 1024
 
 
 def config():
+    """Defaults when config.json is missing; None (allow the call) when it exists but cannot be read or parsed."""
     cdir = os.path.expanduser(os.environ.get("ORCHESTACK_CONFIG_DIR") or "~/.config/orchestack")
+    path = os.path.join(cdir, "config.json")
     cfg = dict(DEFAULTS)
+    if not os.path.exists(path):
+        return cfg
     try:
-        with open(os.path.join(cdir, "config.json"), encoding="utf-8") as f:
-            cfg.update(json.load(f).get("memory_gate", {}) or {})
+        with open(path, encoding="utf-8") as f:
+            section = json.load(f).get("memory_gate", {}) or {}
+        if not isinstance(section, dict):
+            return None
+        cfg.update(section)
+        float(cfg["min_available_gib"]), float(cfg["swap_weight"])
     except Exception:
-        pass
+        return None
     return cfg
 
 
@@ -55,7 +63,7 @@ def main():
     except Exception:
         event = {}
     cfg = config()
-    if not cfg.get("enabled", True):
+    if cfg is None or not cfg.get("enabled", True):
         return
     if remote_call(event.get("tool_name", ""), event.get("tool_input")):
         return
@@ -67,7 +75,7 @@ def main():
         return
     reason = (
         f"orchestack memory gate: free RAM {avail:.1f} GiB < {need:.1f} GiB. "
-        "Wait for a child to finish or free memory, then retry. "
+        "Retry after the next child completion notice or once memory is freed; do not sleep-poll. "
         "(Threshold: memory_gate.min_available_gib in ~/.config/orchestack/config.json.)"
     )
     out = {

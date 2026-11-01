@@ -9,13 +9,13 @@
 #   ELSEWHERE symlink to another path (same or different content)
 #   COPY      a real folder with the same content (hash equal), not linked, so it will drift
 #   DRIFT     a real folder whose content differs (hash shown)
-# Superseded skills (orchestrator-playbook, dual-critic-loop) still installed are listed as OLD.
+# Skills named in $ORCHESTACK_RETIRED (comma-separated) that are still installed are listed as OLD.
 # The hook registrations in ~/.claude/settings.json are checked too. Exit 0 if all ok, 1 otherwise.
 set -Eeuo pipefail
 
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ROOTS=("$HOME/.claude/skills" "$HOME/.codex/skills")
-SUPERSEDED=(orchestrator-playbook dual-critic-loop)
+IFS=, read -r -a SUPERSEDED <<< "${ORCHESTACK_RETIRED:-}"
 bad=0
 
 tree_hash() {  # folder: hash of relative paths + contents, backups and caches skipped

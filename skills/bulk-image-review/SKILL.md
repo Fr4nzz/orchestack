@@ -17,15 +17,16 @@ Measured on one week of real work (cost-weighted tokens from local transcripts):
 
 | Job | Images | Agents | Share of the week |
 |---|---|---|---|
-| Envelope transcription pre-reading | 300 items (crop + photo) | 12 x ~25 items | ~2 % (~0.03 M weighted tokens per item) |
-| Ground-truth card review | ~2,600 cards + 650 rechecks | 12, two of them ~800 calls with thousands of image reads | ~55 % (~0.07 M per card) |
-| Slide and figure checks inside a ~550k writing chat | 89 screenshots | 0 (done in place) | ~1.5 % for 89 images |
+| Label transcription pre-reading | 300 items (crop + photo) | 12 x ~25 items | ~2 % (~0.03 M weighted tokens per item) |
+| Ground-truth card review | a few thousand cards plus rechecks | 12, two of them ~800 calls with thousands of image reads | ~55 % (~0.07 M per card) |
+| Slide and figure checks inside a very large writing chat | ~90 screenshots | 0 (done in place) | ~1.5 % |
 
 ## Ask first
 
-Follow the budget rule in the `orchestrator` skill. Before launching, estimate images x ~0.03 to 0.07 M weighted
-tokens and give the share of a 5-hour window or the week. More than ~100 images in total, or any fan-out over
-several agents, needs the user's OK unless a measured pilot already priced it under the ask threshold.
+Follow the budget rule in the `orchestrator` skill: price from a measured pilot, not from token estimates. Run one
+small batch (one agent, about 25 items) yourself, read the usage meter before and after, and scale to the whole
+job. Ask the user only if that measured price for the whole job is above the ask threshold and not yet approved.
+The per-item figures above are only a sanity check on the pilot.
 
 ## Patterns that worked
 
@@ -46,12 +47,12 @@ several agents, needs the user's OK unless a measured pilot already priced it un
    need a look, merge identical findings, and truncate raw text.
 7. **Blind and anonymous items** (anonymised names, no access to model outputs), so the review is independent. This
    is also cheaper, because the agent doesn't go searching.
-8. **Human confirmation on a sample.** In the envelope job the user checked 40 of 300 items, found no corrections,
+8. **Human confirmation on a sample.** In the transcription job the user checked 40 of 300 items, found no corrections,
    and accepted the rest.
 
 ## Which model
 
-Tested on about 200 outline cards, each reviewed twice by the default model:
+Tested on about 200 ground-truth cards, each reviewed twice by the default model:
 
 - **Small model (Haiku class):** when it decides, it agreed with the default model 96 to 98 % of the time, the same
   as the default model agrees with itself (98 %). It answered "unsure" more often (23 % vs 17 %). Use it as a first

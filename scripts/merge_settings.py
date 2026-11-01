@@ -4,23 +4,37 @@
   merge_settings.py SETTINGS HOOKS_JSON REPO_ROOT [--uninstall] [--dry-run]
 
 HOOKS_JSON is the repo's hooks/hooks.json. "${CLAUDE_PLUGIN_ROOT}" in it is replaced by REPO_ROOT. Existing keys
-and other hooks are kept. A matcher group is ours when one of its commands points into REPO_ROOT/hooks/. Install is
-idempotent: our old groups are replaced by the current ones. With --dry-run the result is printed, not written.
+and other hooks are kept. A hook entry is ours when its command points into REPO_ROOT/hooks/; only those entries are
+removed, so other hooks in the same matcher group survive. Install is idempotent: our old entries are replaced by
+the current ones. A symlinked settings file is written through the link and keeps its mode. With --dry-run the result is printed, not written.
 The caller makes the backup.
 """
 import json
 import os
+import shutil
 import sys
 
 
-def ours(group, hooks_dir):
-    return any(hooks_dir in (h.get("command") or "") for h in group.get("hooks", []))
+def ours(hook, hooks_dir):
+    return hooks_dir in (hook.get("command") or "")
+
+
+def strip_ours(groups, hooks_dir):
+    kept = []
+    for g in groups:
+        entries = g.get("hooks", [])
+        rest = [h for h in entries if not ours(h, hooks_dir)]
+        if len(rest) == len(entries):
+            kept.append(g)
+        elif rest:
+            kept.append({**g, "hooks": rest})
+    return kept
 
 
 def merge(settings, registrations, hooks_dir, uninstall=False):
     hooks = settings.setdefault("hooks", {})
     for event in set(hooks) | set(registrations):
-        kept = [g for g in hooks.get(event, []) if not ours(g, hooks_dir)]
+        kept = strip_ours(hooks.get(event, []), hooks_dir)
         if not uninstall:
             kept += registrations.get(event, [])
         if kept:
@@ -53,10 +67,15 @@ def main(argv):
     if "--dry-run" in flags:
         sys.stdout.write(out)
         return 0
-    tmp = settings_path + ".orchestack-tmp"
+    target = os.path.realpath(settings_path)
+    tmp = target + ".orchestack-tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(out)
-    os.replace(tmp, settings_path)
+    if os.path.exists(target):
+        shutil.copymode(target, tmp)
+    else:
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
     return 0
 
 

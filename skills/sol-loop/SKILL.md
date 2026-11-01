@@ -16,8 +16,8 @@ them. Be careful of scope creep and don't be scared to push back.
 - **Always two reviews per round:** GPT Sol (other vendor) and a fresh Opus that shares none of your context. They
   behave like different reviewers and find different mistakes, so every round uses both, even for a small
   revision. Scale the scope instead: a small revision gets both critics on the diff or the changed sections only.
-- **Applies to code, writing, analyses, plots and UI.** For code, accept a Sol suggestion only after the tests or
-  checks pass with it.
+- **Applies to code, writing, analyses, plots and UI.** For code, accept a fix from either critic only after the tests
+  or checks pass with it.
 - **Models:** use the pinned ids from `local.md`. Without a pin, pick the current Sol and Opus from
   `orchestrator_capabilities`. Do not hardcode an id. Never move to a newer or pricier model on your own. Suggest it.
 - Critics must not start subagents or reviewers of their own.
@@ -34,7 +34,8 @@ them. Be careful of scope creep and don't be scared to push back.
 ## 1. Scope
 
 Run `git status --short`. Do not stash, discard or include unrelated changes. Limit review to the change paths if
-they separate cleanly. Otherwise stop and ask.
+they separate cleanly. Otherwise choose the paths that belong to this change, state the choice in the brief, and
+continue.
 
 Find the base after `git fetch origin`:
 
@@ -54,8 +55,9 @@ In T3, call `orchestrator_capabilities`, then call `delegate_task` once per crit
 by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use `t3_thread_send`,
 `create_threads` or `t3_thread_launch` for review.
 
-Outside T3, use native subagents that actually run each model. If no route runs Sol, finish with Opus, mark the
-review one-critic in the report, and rerun Sol when it is back. Do not substitute another model silently.
+Outside T3, use native subagents that actually run each model. If no route runs Sol (or Opus), the round is incomplete:
+it cannot pass, nothing is approved, and you report it as waiting for the missing critic and rerun that critic
+when it is back. Never substitute another model and never pass a round on one review.
 
 Do not edit the work under review while they run. End the turn and follow each completion notice. A chat that is
 itself a child calls `t3_thread_wait` on each critic instead, so its parent is not woken by a waiting turn. If a

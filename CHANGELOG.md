@@ -7,7 +7,7 @@
   progress is not news (only `decision:`, `done:`, `failed:`, `handoff:` go up, FYIs to a notes file), one
   scheduled wake for cluster waits, no schedules just because children exist, fresh workers for big chats,
   `t3_thread_launch` for long waits as an opt-in, and a free-RAM check before local work.
-- `sol-loop` skill: one review loop replacing both the single-critic `sol-loop` and `dual-critic-loop`. Two
+- `sol-loop` skill: one review loop replacing a single-critic loop. Two
   independent critics every round (GPT Sol + a fresh Opus) for code, writing, analyses and UI.
 - `bulk-image-review` skill: moved in and generalised.
 - `hooks/role_card.py`: SessionStart role card for orchestrator and lead chats (thread-id registry or T3 title).

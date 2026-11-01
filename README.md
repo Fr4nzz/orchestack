@@ -49,7 +49,7 @@ git clone <this repo> ~/src/orchestack
 
 1. symlinks each skill into `~/.claude/skills` and `~/.codex/skills`, so one checkout feeds both harnesses and
    `git pull` updates them (copies in two places drift apart),
-2. moves any existing folder of the same name, and the superseded `orchestrator-playbook` and `dual-critic-loop`,
+2. moves any existing folder of the same name (and, with `--retire=a,b`, your own older skills of those names)
    to `~/.local/share/orchestack/backups/<timestamp>/` with `mv` (never deletes). Backups live outside the skill
    folders because agents load every `SKILL.md` they find there,
 3. merges the hook registrations into `~/.claude/settings.json` after a backup, keeping every existing key,
