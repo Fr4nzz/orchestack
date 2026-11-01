@@ -40,7 +40,8 @@ for root in "${ROOTS[@]}"; do
       echo "MISSING   $dst"; bad=1
     fi
   done
-  for name in "${SUPERSEDED[@]}"; do
+  for name in ${SUPERSEDED[@]+"${SUPERSEDED[@]}"}; do
+    [[ -n $name && $name != */* && $name != . && $name != .. ]] || continue
     if [[ -e $root/$name ]]; then echo "OLD       $root/$name (superseded by orchestack)"; bad=1; fi
   done
 done

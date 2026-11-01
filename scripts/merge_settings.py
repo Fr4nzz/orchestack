@@ -69,12 +69,11 @@ def main(argv):
         return 0
     target = os.path.realpath(settings_path)
     tmp = target + ".orchestack-tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(out)
     if os.path.exists(target):
         shutil.copymode(target, tmp)
-    else:
-        os.chmod(tmp, 0o600)
     os.replace(tmp, target)
     return 0
 

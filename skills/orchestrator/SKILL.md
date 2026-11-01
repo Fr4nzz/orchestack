@@ -66,7 +66,9 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     at each turn end and reports only by sending a message. Use it only with the user's standing permission
     (recorded in `local.md`), and pair it with a backstop that reports a dead child.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: see `bulk-image-review`), results to files and
-    one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest.
+    one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest, with a manifest of
+    expected job ids and the fallback in the brief. For repeated well-specified waves, pilot a mid-tier model against
+    the default on one batch and keep the cheaper one if a spot check passes.
 13. **Memory, not the number of agents, is the limit.** Before local app, browser, build or model work, check free
     RAM. The orchestack memory gate denies a dispatch below its threshold. Retry after the next completion notice.
 
@@ -75,15 +77,19 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 14. **Status checks read each child's live run state** (running, idle, failed, waiting on approval), not only logs.
     After an outage (full disk, provider failure, harness restart), fix what still fails, then resume what broke,
     checking for uncommitted edits first.
-15. **Confirm what is installed, deployed or running before stating it.** Before handing the user a link or file,
-    open it the way they will.
-16. **Hygiene:** keep large untracked outputs out of repos the harness checkpoints every turn (move them or ignore
-    them above about 50 MB per file). Use one lock file per server for shared slots such as deploys. Push only your
-    own commits (check `git log origin/<branch>..HEAD`).
+15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
+    done-check before reporting it done. Before handing the user a link or file, open it the way they will.
+16. **Deploy finished, tested work by default** where the project allows it, always with a rollback path.
+    Shared slots (a deploy, a GPU) use one lock file per server that names the holder, start time and rollback
+    path. The holder builds on the newest live release and sends one `done:` after.
+17. **Hygiene:** keep large untracked outputs out of repos the harness checkpoints every turn (move or ignore them
+    above about 50 MB per file), and check untracked sizes and free disk before a long run. Push only your own
+    commits: if `git log origin/<branch>..HEAD` lists other chats' commits, branch from `origin/<branch>`,
+    cherry-pick yours and push that.
 
 ## Briefs
 
-17. **Keep briefs short.** Quote the user's words for the goal, list the explicit asks as a done-check the child runs
+18. **Keep briefs short.** Quote the user's words for the goal, list the explicit asks as a done-check the child runs
     before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy:
 
     > Command safety: absolute paths, no `cd` in compound commands, no `rm` of globs, variables or relative paths,
@@ -97,10 +103,10 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 ## Models and review
 
-18. **Use the pinned default model and choose the effort on purpose:** low or medium for routine steps, high for
+19. **Use the pinned default model and choose the effort on purpose:** low or medium for routine steps, high for
     hard ones, never max by default. Only the user changes pinned models. Suggest a newer or pricier one instead of
     switching. A mid-tier model at medium effort suits well-specified work. A small model only for read-only
     scouting, script-verified results, or a calibrated image first pass (`bulk-image-review`), never for final
     judgement.
-19. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
+20. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
     independent reviews per round (the other vendor's model and a fresh default-vendor model).

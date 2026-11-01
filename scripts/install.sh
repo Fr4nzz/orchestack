@@ -55,6 +55,20 @@ newest_backup() {  # root-label name
 skills=()
 for s in "$REPO"/skills/*/; do skills+=("$(basename "$s")"); done
 
+# --retire names: skip empty ones, refuse anything that is not a plain skill name or is one of ours.
+checked=()
+for name in ${SUPERSEDED[@]+"${SUPERSEDED[@]}"}; do
+  [[ -z $name ]] && continue
+  if [[ ! $name =~ ^[A-Za-z0-9._-]+$ || $name == . || $name == .. ]]; then
+    echo "refusing --retire name '$name' (not a plain skill name)" >&2; exit 2
+  fi
+  for own in "${skills[@]}"; do
+    if [[ $name == "$own" ]]; then echo "refusing --retire name '$name' (an orchestack skill)" >&2; exit 2; fi
+  done
+  checked+=("$name")
+done
+SUPERSEDED=(${checked[@]+"${checked[@]}"})
+
 if (( UNINSTALL )); then
   for root in "${ROOTS[@]}"; do
     for name in "${skills[@]}" ${SUPERSEDED[@]+"${SUPERSEDED[@]}"}; do
@@ -84,9 +98,14 @@ if (( UNINSTALL )); then
       python3 -I - "$CLAUDE_MD" "$LINE" <<'PY'
 import sys
 path, line = sys.argv[1], sys.argv[2]
-text = open(path, encoding="utf-8").read()
-text = text.replace("\n" + line + "\n", "\n").replace(line + "\n", "").replace(line, "")
-open(path, "w", encoding="utf-8").write(text)
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+out = [l for l in lines if l.rstrip("\n") != line]
+# drop the blank line install added before ours
+for i, l in enumerate(lines):
+    if l.rstrip("\n") == line and i > 0 and lines[i - 1] == "\n" and lines[i - 1] in out:
+        out.remove(lines[i - 1])
+        break
+open(path, "w", encoding="utf-8").write("".join(out))
 PY
       say "removed the orchestack line from $CLAUDE_MD"
     fi

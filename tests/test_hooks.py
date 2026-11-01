@@ -259,7 +259,18 @@ def test_precommit_uses_external_pattern_file(tmp_path):
     (repo / "note.md").write_text("mentions secretproject here\n")
     pats = tmp_path / "patterns.txt"
     pats.write_text("secretproject\n")
-    subprocess.run(["git", "-C", str(repo), "add", "note.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "note.md", "scripts", ".githooks"], check=True)
     env = {**os.environ, "ORCHESTACK_SCRUB_PATTERNS": str(pats)}
     p = subprocess.run([str(repo / ".githooks/pre-commit")], cwd=repo, env=env, capture_output=True, text=True)
     assert p.returncode != 0 and "secretproject" in p.stdout
+
+
+def test_install_refuses_bad_retire_names(tmp_path):
+    env = {**os.environ, "HOME": str(tmp_path)}
+    for bad in ("a,,../x", "orchestrator", "a/b"):
+        p = subprocess.run(["bash", str(REPO / "scripts" / "install.sh"), "--dry-run", f"--retire={bad}"],
+                           env=env, capture_output=True, text=True)
+        assert p.returncode == 2 and "refusing" in p.stderr, bad
+    p = subprocess.run(["bash", str(REPO / "scripts" / "install.sh"), "--dry-run", "--retire=a,,b"],
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 0 and "mv --" not in p.stdout
