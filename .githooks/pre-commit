@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# pre-commit: block commits that fail the privacy scrub or lint.
+# Enable once per clone: git config core.hooksPath .githooks
+set -Eeuo pipefail
+cd "$(git rev-parse --show-toplevel)"
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+(( ${#staged[@]} )) || exit 0
+scripts/scrub_check.sh "${staged[@]}"
+scripts/lint.sh

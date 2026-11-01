@@ -1,0 +1,16 @@
+{
+  "name": "orchestack",
+  "owner": {
+    "name": "orchestack contributors"
+  },
+  "description": "Skills and hooks for coding-agent orchestrators in T3 Code: route, decide, wait cheaply, review with two critics.",
+  "plugins": [
+    {
+      "name": "orchestack",
+      "source": "./",
+      "description": "Orchestrator playbook, two-critic sol-loop, bulk image review, role-card and memory-gate hooks.",
+      "category": "productivity",
+      "keywords": ["orchestration", "t3code", "subagents", "review", "skills"]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "orchestack",
+  "version": "0.1.0",
+  "description": "Skills and hooks for running coding-agent orchestrators in T3 Code (Claude Code and Codex): an orchestrator playbook, a two-critic review loop, cheap bulk image review, a role card that survives compaction, and a free-memory gate on dispatches.",
+  "author": {
+    "name": "orchestack contributors"
+  },
+  "repository": "https://github.com/<owner>/orchestack",
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "t3code",
+    "claude-code",
+    "codex",
+    "subagents",
+    "review",
+    "skills",
+    "hooks"
+  ],
+  "skills": [
+    "./skills/bulk-image-review",
+    "./skills/orchestrator",
+    "./skills/sol-loop"
+  ]
+}

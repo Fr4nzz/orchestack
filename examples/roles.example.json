@@ -1,0 +1,5 @@
+{
+  "mcp:00000000-orchestrator-example": "orchestrator",
+  "mcp:00000000-lead-example": "lead",
+  "mcp:00000000-quiet-example": "none"
+}

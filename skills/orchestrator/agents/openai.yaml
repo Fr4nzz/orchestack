@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrator"
+  short_description: "Route and decide: parallel delegates, cheap waits, pilot-priced budgets"
+  default_prompt: "Use $orchestrator: you are the orchestrator. Split this into parallel lanes, delegate them, and decide reversible steps yourself."

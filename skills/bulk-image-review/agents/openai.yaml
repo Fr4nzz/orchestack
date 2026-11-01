@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bulk Image Review"
+  short_description: "Plan cheap agent review of many images: small fresh workers, crops, files"
+  default_prompt: "Use $bulk-image-review to plan and price this image review before launching agents."

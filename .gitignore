@@ -1,0 +1,6 @@
+# personal scrub patterns (see CONTRIBUTING.md)
+.scrub-patterns.local
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
