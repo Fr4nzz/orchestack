@@ -1,0 +1,11 @@
+# orchestack watcher: every 15 minutes. Enabled only by scripts/install.sh --watcher.
+[Unit]
+Description=orchestack watcher every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

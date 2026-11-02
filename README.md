@@ -23,6 +23,8 @@ plan's usage meter) found:
 - Images reviewed by small fresh workers cost about 2 % of a week per 300 items. The same kind of review in a few
   long agents cost about 55 %.
 - An outdated copy of the rules pasted into a brief caused about 25 extra parent wakes.
+- 30 AI scheduled checks that woke a large orchestrator every 3 to 6 h cost about **1.6 % of a week in 4 days**,
+  and most of them found no change. The watcher below replaces them.
 
 ## What is in it
 
@@ -32,6 +34,7 @@ plan's usage meter) found:
 | `skills/sol-loop` | "sol loop", "dual critic", "critic loop" | One review loop with two independent critics per round (GPT Sol + a fresh Opus), smallest fixes, a ledger, a stop rule. |
 | `skills/bulk-image-review` | before agents look at many images | Cost model, ask-first threshold, and the small-fresh-worker pattern. |
 | `hooks/role_card.py` | Claude Code `SessionStart` (`startup`, `resume`, `compact`) | Prints a 7-line role card into context for orchestrator and lead chats, so the role survives compaction. |
+| `watcher/watch.py` | systemd `--user` timer, every 15 min (opt-in) | Wakes a chat only when something changed: jobs ended, a child failed, low disk, weekly reset or behind pace, an unanswered `decision:`. No model calls. |
 | `hooks/memory_gate.py` | Claude Code `PreToolUse` on `Agent`, `delegate_task`, `t3_thread_launch` | Denies a local dispatch when free RAM is under a threshold (default 3 GiB). Never counts agents. |
 
 The hooks use only the Python standard library, exit 0 on every error, and take about 20 ms.
@@ -57,7 +60,7 @@ git clone <this repo> ~/src/orchestack
    chats (told 'you are the orchestrator', or titled Orchestrator:/Lead:): load the `orchestrator` skill at start
    and again after every compaction."
 
-`--uninstall` reverses all four and restores the newest backups. `--keep-old` leaves superseded skills in place.
+`--watcher` (off by default) also installs the change-only watcher (see below). `--uninstall` reverses all of it and restores the newest backups. `--keep-old` leaves superseded skills in place.
 A Claude Code plugin manifest (`.claude-plugin/`, `hooks/hooks.json`) is included but less tested than the script.
 Use one method, not both. Codex gets the skills only (the hooks are Claude Code hooks).
 
@@ -77,6 +80,49 @@ Everything personal lives outside the repo, in `~/.config/orchestack/` (or `$ORC
     `Orchestrator:` or `Lead:` gets the card too. The hook opens it read-only and looks up one row by primary key.
     It never scans (the database can be tens of GB) and skips silently on any error.
   - `role_card.skill_path`: the installed orchestrator skill the card tells the chat to re-read.
+
+## Watcher
+
+`watcher/watch.py` replaces AI scheduled checks. It runs every 15 minutes from a systemd `--user` timer, calls no
+model, and compares what it sees with its last run (`~/.local/state/orchestack/watch.json`). Each change wakes one
+chat once, with a short message that starts with the reason, e.g. `watcher: jobs: train.json: all 4 jobs ended
+(DONE 4). Next step: ...`. Checks, each enabled by its section in `config.json` under `watcher`:
+
+| Check | Wakes | When |
+|---|---|---|
+| `jobs` | the thread named in the job file | every job in a `<project>/.work/orchestrator/jobs/<name>.json` ended, or one failed |
+| `children` | the child's parent | a T3 child thread's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
+| `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
+| `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day` |
+| `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
+| `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
+
+A job file is what a child writes before it ends its turn on a long wait:
+`{"thread": "<owner thread id>", "jobs": ["4711", "4712"], "next_step": "read results/metrics.json"}` (`jobs`
+defaults to the file name). `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
+`["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job
+file is open, and a failed command decides nothing.
+
+The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill): pick
+the most valuable reversible, in-budget item the user would be proud to find started, run it through delegates and
+report afterwards. With an empty backlog it proposes 3 ideas grounded in the project's state and starts the best
+reversible one. Irreversible or outward-facing items wait for the user.
+
+Rules: at most one wake per thread per `rate_limit_minutes` (60) except disk and failures, optional `quiet_hours`
+(`{"start": "23:00", "end": "07:00"}` in `timezone`), and held wakes go out merged later. The first run of a check
+records what already exists without waking. The T3 database is opened read-only and read by indexed columns only.
+
+How it wakes a chat: the T3 CLI, `t3 thread send --base-dir <t3_home> <thread> -` (the message on stdin, and a busy
+chat gets it as its next turn). With `t3_home` set, the watcher runs the T3 version named in
+`<t3_home>/runtime/service-state.json`, so a `t3` on `PATH` from an older install is not used. For a thread that
+has a webhook scheduled task (prompt `{{body.text}}`), put its URL in `wake.webhooks` and the watcher POSTs
+`{"text": ...}` there instead. The URL holds a token: keep it in `config.json` only, never in a repo or a log.
+
+```bash
+watcher/watch.py --dry-run --verbose      # what it sees and would send, changes nothing
+scripts/install.sh --dry-run --watcher    # then without --dry-run to enable the timer
+journalctl --user -u orchestack-watch     # what it sent
+```
 
 ## Development
 

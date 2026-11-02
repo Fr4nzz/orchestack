@@ -1,0 +1,12 @@
+# orchestack watcher: one check run. scripts/install.sh --watcher writes this to ~/.config/systemd/user/
+# with @REPO@ replaced by the checkout path. Started by orchestack-watch.timer.
+[Unit]
+Description=orchestack watcher (wakes a chat only when something changed)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env python3 -I @REPO@/watcher/watch.py
+Nice=10
+TimeoutStartSec=900
+UMask=0077

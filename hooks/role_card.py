@@ -72,7 +72,8 @@ def card(role, thread_id, source, skill_path, overlay):
         " start it in the same reply.",
         f"5. Progress is not news. Only decision:, done:, failed: or handoff: go to {up}."
         " FYIs go to the notes file.",
-        "6. Long waits: one scheduled wake at the projected finish plus a state file. Never sleep-poll.",
+        "6. Long waits: a job file for the watcher (or one wake at the projected finish) plus a state file."
+        " Never sleep-poll.",
     ]
     return "\n".join(lines)
 

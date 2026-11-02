@@ -51,17 +51,22 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 ## Waiting
 
-8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit, schedule ONE
-   wake at the projected finish, write a state file (job ids, outputs, next step, the schedule id), and end the
-   turn with `handoff:`. At the wake, a fresh worker (or the child) reads the state file and reports `done:` or
-   `failed:`. A background wait that times out after 2 h returns to an expired cache and costs more.
+8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit, write a job
+   file `.work/orchestrator/jobs/<name>.json` in the project (`{"thread": "<your thread id>", "jobs": ["<id>"],
+   "next_step": "..."}`) and a state file (outputs, next step), and end the turn with `handoff:`. The watcher
+   wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the
+   projected finish instead. At the wake, a fresh worker (or the child) reads the state file and reports `done:`
+   or `failed:`. A background wait that times out after 2 h returns to an expired cache and costs more.
 9. **Short waits (under about 1 h): wait inside one tool call, without ending the turn,** because a child's turn
    end wakes its parent whatever it says. Claude: one background command or Monitor that exits when every job has
    ended or one has failed, then `t3_background_wait`. Codex: one foreground command that blocks until the jobs end
    (a scheduler wait command, or one until-loop within the tool timeout). Delegates: `t3_thread_wait`. Never a
    series of `sleep` tool calls.
-10. **No scheduled checks just because children exist.** Completion notices already wake the parent. Keep at most
-    one backstop schedule per chat, record its id, delete duplicates by id, and delete it when the work settles.
+10. **Use the orchestack watcher instead of AI scheduled checks.** It runs every 15 min without a model and wakes a
+    chat only when something changed: jobs ended or failed, a child failed, waits on an approval or is stuck, disk
+    is low, the weekly reset came or usage is far behind pace, a `decision:` sat unanswered. No recurring AI
+    schedules. The one exception is a one-off wake at a projected finish the watcher cannot see. Record its id and
+    delete it when the work settles. Completion notices already wake the parent.
 11. **Launched instead of delegated (opt-in, off by default).** A `t3_thread_launch` child does not wake its parent
     at each turn end and reports only by sending a message. Use it only with the user's standing permission
     (recorded in `local.md`), and pair it with a backstop that reports a dead child.
@@ -95,7 +100,7 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     > Command safety: absolute paths, no `cd` in compound commands, no `rm` of globs, variables or relative paths,
     > fresh timestamped output folders, no `git commit -a`, `git reset --hard`, `git clean` or force pushes. If a
     > command raises an approval prompt, rewrite it into the safe form rather than wait. Short waits: inside one
-    > tool call. Waits over about 1 h: state file, one scheduled wake, end with `handoff:`. Send up only
+    > tool call. Waits over about 1 h: a job file for the watcher plus a state file, end with `handoff:`. Send up only
     > `decision:`, `done:`, `failed:` or `handoff:`. End your turn only with the result, a failure or a real
     > question.
 
@@ -110,3 +115,22 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     judgement.
 20. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
     independent reviews per round (the other vendor's model and a fresh default-vendor model).
+
+## Backlog
+
+21. **Record every idea that is not executed now** (the user's, a child's or your own) in
+    `.work/orchestrator/IDEAS.md` in the project when it comes up, one block per idea:
+
+    ```
+    ## <the idea in one line>
+    - origin: <who or which chat>, <YYYY-MM-DD>
+    - value: <what it gives the user>
+    - cost: <rough % of the week>
+    - reversible: yes | no
+    - status: open | started <YYYY-MM-DD> <thread> | done | dropped (<why>)
+    ```
+22. **On the watcher's backlog prompt** (weekly reset, or far behind pace): pick the most valuable reversible,
+    in-budget open item the user would be proud to find started, run it through delegates, set its status and
+    report afterwards. Empty backlog: mine the notes file and recent chats for forgotten ideas, propose 3 grounded
+    in the project's current state, add them and start the best reversible one. Irreversible or outward-facing
+    items wait for the user.

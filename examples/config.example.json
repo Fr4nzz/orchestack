@@ -7,5 +7,52 @@
   "role_card": {
     "t3_state_db": "~/.t3/userdata/statev2.sqlite",
     "skill_path": "~/.claude/skills/orchestrator/SKILL.md"
+  },
+  "watcher": {
+    "enabled": true,
+    "t3_home": "~/.t3",
+    "orchestrator": "mcp:<orchestrator thread id>",
+    "projects": [
+      "~/src/web-shop"
+    ],
+    "timezone": "America/New_York",
+    "rate_limit_minutes": 60,
+    "quiet_hours": null,
+    "wake": {
+      "webhooks": {}
+    },
+    "jobs": {
+      "command": [
+        "ssh",
+        "cluster-login",
+        "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"
+      ],
+      "done_states": [
+        "DONE"
+      ],
+      "failed_states": [
+        "EXIT"
+      ]
+    },
+    "children": {
+      "stuck_hours": 3,
+      "approval_minutes": 10
+    },
+    "disk": {
+      "paths": [
+        "/"
+      ],
+      "min_free_gb": 20
+    },
+    "usage": {
+      "command": "python3 ~/tools/usage_meter.py",
+      "weekly_reset": "Mon 09:00",
+      "pace_per_day": 15,
+      "behind_by": 20
+    },
+    "decision": {
+      "minutes": 30
+    },
+    "hosts": []
   }
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- `watcher/watch.py`: change-only watcher on a 15-minute systemd `--user` timer, no model calls. Checks for
+  cluster jobs (job files, owner thread woken), failed, waiting or stuck T3 children (parent woken), low disk,
+  weekly usage reset or behind pace (backlog prompt), unanswered `decision:` messages, and a host-online copy hook.
+  Wakes through `t3 thread send` or a scheduled-task webhook, one per change, rate-limited, quiet hours, dry run.
+- `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
+- `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
+  write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.
+
 ## 0.1.0 (2026-11-01)
 
 - `orchestrator` skill: the orchestrator playbook, generalised, with a "Becoming an orchestrator" section and new

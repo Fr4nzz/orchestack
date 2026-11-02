@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh: install orchestack for Claude Code and Codex from this checkout.
 #
-#   scripts/install.sh [--dry-run] [--uninstall] [--retire=NAME[,NAME...]]
+#   scripts/install.sh [--dry-run] [--uninstall] [--retire=NAME[,NAME...]] [--watcher]
 #
 # 1. Symlinks each skills/<name> into ~/.claude/skills and ~/.codex/skills. An existing folder or foreign symlink
 #    of the same name is moved (never deleted) to ~/.local/share/orchestack/backups/<ts>/<root>/<name>.bak-<ts>.
@@ -9,20 +9,23 @@
 # 2. --retire=NAME,... also moves your own older skills of those names to the same backup folder (off by default).
 # 3. Merges the hook registrations (hooks/hooks.json) into ~/.claude/settings.json after a timestamped backup.
 # 4. Adds one line to ~/.claude/CLAUDE.md if it is not there yet (after a timestamped backup).
-# --uninstall removes our symlinks, hook registrations and CLAUDE.md line, and restores the newest backup of each
-# skill name if its slot is empty. --dry-run prints every step and changes nothing.
+# 5. --watcher (off by default) installs the change-only watcher: writes orchestack-watch.{service,timer} to
+#    ~/.config/systemd/user and enables the timer (every 15 min). Try watcher/watch.py --dry-run first.
+# --uninstall removes our symlinks, hook registrations, CLAUDE.md line and watcher units, and restores the newest
+# backup of each skill name if its slot is empty. --dry-run prints every step and changes nothing.
 set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TS=$(date +%Y%m%d-%H%M%S)
-DRY=0 UNINSTALL=0
+DRY=0 UNINSTALL=0 WATCHER=0
 SUPERSEDED=()
 for a in "$@"; do
   case $a in
     --dry-run) DRY=1 ;;
     --uninstall) UNINSTALL=1 ;;
+    --watcher) WATCHER=1 ;;
     --retire=*) IFS=, read -r -a SUPERSEDED <<< "${a#--retire=}" ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
@@ -32,6 +35,8 @@ BACKUP_BASE="$HOME/.local/share/orchestack/backups"
 BACKUP="$BACKUP_BASE/$TS"
 SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+UNIT_DIR="$HOME/.config/systemd/user"
+UNITS=(orchestack-watch.service orchestack-watch.timer)
 LINE="Orchestrator or lead chats (told 'you are the orchestrator', or titled Orchestrator:/Lead:): load the \`orchestrator\` skill at start and again after every compaction."
 
 say() { echo "$*"; }
@@ -110,6 +115,13 @@ PY
       say "removed the orchestack line from $CLAUDE_MD"
     fi
   fi
+  if [[ -f $UNIT_DIR/orchestack-watch.timer || -f $UNIT_DIR/orchestack-watch.service ]]; then
+    run systemctl --user disable --now orchestack-watch.timer
+    for u in "${UNITS[@]}"; do
+      if [[ -f $UNIT_DIR/$u ]]; then run rm -f -- "$UNIT_DIR/$u"; say "removed $UNIT_DIR/$u"; fi
+    done
+    run systemctl --user daemon-reload
+  fi
   exit 0
 fi
 
@@ -144,6 +156,23 @@ else
   if [[ -f $CLAUDE_MD ]]; then run cp -p -- "$CLAUDE_MD" "$CLAUDE_MD.bak-orchestack-$TS"; fi
   if (( DRY )); then say "  would append to $CLAUDE_MD: $LINE"
   else printf '\n%s\n' "$LINE" >> "$CLAUDE_MD"; say "added the orchestack line to $CLAUDE_MD"
+  fi
+fi
+
+if (( WATCHER )); then
+  [[ -d $UNIT_DIR ]] || run mkdir -p "$UNIT_DIR"
+  if (( DRY )); then
+    say "  would write $UNIT_DIR/orchestack-watch.service (runs $REPO/watcher/watch.py)"
+    say "  would write $UNIT_DIR/orchestack-watch.timer (every 15 min)"
+  else
+    sed "s|@REPO@|$REPO|g" "$REPO/watcher/orchestack-watch.service" > "$UNIT_DIR/orchestack-watch.service"
+    cp -- "$REPO/watcher/orchestack-watch.timer" "$UNIT_DIR/orchestack-watch.timer"
+    say "wrote $UNIT_DIR/orchestack-watch.{service,timer}"
+  fi
+  run systemctl --user daemon-reload
+  run systemctl --user enable --now orchestack-watch.timer
+  if ! python3 -I -c 'import json,os,sys; p=os.path.expanduser("~/.config/orchestack/config.json"); sys.exit(0 if "watcher" in json.load(open(p)) else 1)' 2>/dev/null; then
+    say "note: config.json has no watcher section yet, so each run does nothing (see examples/config.example.json)"
   fi
 fi
 
