@@ -36,6 +36,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,14 +72,14 @@ Q_LATEST_RUN = (
     "SELECT run_id, status, requested_at, completed_at FROM orchestration_v2_projection_runs"
     " WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1"
 )
+# The statuses are literals, not parameters: SQLite uses T3's partial index (WHERE status IN (...)) only when it can
+# see at prepare time that the query's statuses are covered.
+ACTIVE_SQL = ", ".join(f"'{a}'" for a in ACTIVE)
 Q_ACTIVE_RUNS = (
     "SELECT run_id, thread_id, status, requested_at, json_extract(payload_json, '$.startedAt')"
-    " FROM orchestration_v2_projection_runs WHERE status IN ({})".format(",".join("?" * len(ACTIVE)))
+    f" FROM orchestration_v2_projection_runs WHERE status IN ({ACTIVE_SQL})"
 )
-Q_BUSY = (
-    "SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ? AND status IN ({}) LIMIT 1"
-    .format(",".join("?" * len(ACTIVE)))
-)
+Q_BUSY = f"SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ? AND status IN ({ACTIVE_SQL}) LIMIT 1"
 Q_PENDING_REQUESTS = (
     "SELECT runtime_request_id, thread_id, kind, created_at FROM orchestration_v2_projection_runtime_requests"
     " WHERE status = 'pending'"
@@ -93,16 +94,17 @@ Q_ANSWERED_AFTER = (
     " WHERE thread_id = ? AND created_at > ? AND role = 'assistant' AND streaming = 0 LIMIT 1"
 )
 
-T, R, RQ, M = ("orchestration_v2_projection_threads", "orchestration_v2_projection_runs",
-               "orchestration_v2_projection_runtime_requests", "orchestration_v2_projection_messages")
-# Indexes each check's queries need: (table, leading columns, text the index's WHERE clause must contain or None).
-# Without them a query could scan the whole database, so the check is skipped instead.
-REQUIRED_INDEXES = {
-    "children": [(T, ("thread_id",), None), (T, ("project_id", "updated_at"), None), (R, ("thread_id", "ordinal"), None),
-                 (R, ("status",), "status in"), (RQ, ("thread_id",), "status = 'pending'")],
-    "decision": [(R, ("thread_id",), None), (M, ("thread_id", "updated_at"), "role = 'user'"),
-                 (M, ("thread_id", "created_at"), None)],
+# Each check's queries with sample parameters. Before a check runs, EXPLAIN QUERY PLAN must show no scan of a big
+# table (a plain scan, or a scan of an index that is not partial), or the check is skipped: after a T3 schema change
+# a query could otherwise read the whole database.
+PLANNED = {
+    "children": [(Q_PROJECTS, ()), (Q_RECENT_THREADS, ("", "")), (Q_THREAD, ("",)), (Q_LATEST_RUN, ("",)),
+                 (Q_ACTIVE_RUNS, ()), (Q_PENDING_REQUESTS, ()), (Q_BUSY, ("",))],
+    "decision": [(Q_BUSY, ("",)), (Q_LATEST_USER_MESSAGES, ("",)), (Q_ANSWERED_AFTER, ("", ""))],
 }
+SCAN_OK = {"projection_projects", "orchestration_v2_projection_runtime_requests"}  # tiny tables
+SCAN_RE = re.compile(r"^SCAN (?:TABLE )?(\w+)(?: USING (?:COVERING )?INDEX (\S+))?")
+NO_JOBS_RE = re.compile(r"No (unfinished )?job found", re.I)
 
 
 # ---------- small helpers ----------
@@ -226,24 +228,16 @@ class Ctx:
                 lambda: 1 if self.deadline is not None and time.monotonic() > self.deadline else 0, 1000)
         return self._db
 
-    def require_indexes(self, check):
-        """Raise unless every index the check's queries need exists (names may change, columns may not)."""
+    def require_plans(self, check):
+        """Raise if any of the check's queries would scan a big table (see PLANNED)."""
         db = self.db()
-        for table, cols, where in REQUIRED_INDEXES.get(check, []):
-            ok = False
-            for row in db.execute(f"PRAGMA index_list('{table}')").fetchall():
-                name = row[1]
-                got = tuple(r[2] for r in db.execute(f"PRAGMA index_info('{name}')").fetchall())
-                if got[: len(cols)] != cols:
-                    continue
-                sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", (name,))
-                       .fetchone() or [None])[0] or ""
-                if where is None or where in " ".join(sql.lower().split()):
-                    ok = True
-                    break
-            if not ok:
-                raise RuntimeError(f"T3 database has no index on {table}({', '.join(cols)})"
-                                   + (f" WHERE {where}" if where else "") + ", skipped to avoid a full scan")
+        partial = {name for name, sql in db.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index'")
+                   if sql and " where " in " ".join(sql.lower().split())}
+        for query, params in PLANNED.get(check, []):
+            for row in db.execute("EXPLAIN QUERY PLAN " + query, params).fetchall():
+                m = SCAN_RE.match(str(row[-1]))
+                if m and m.group(1) not in SCAN_OK and m.group(2) not in partial:
+                    raise RuntimeError(f"query plan would scan {m.group(1)} ({row[-1]}), skipped to avoid a full scan")
 
     def close(self):
         if self._db is not None:
@@ -282,7 +276,9 @@ def check_jobs(ctx):
     groups = []
     too_old = (ctx.now - timedelta(days=KEEP_DAYS)).timestamp()
     for f in files:
-        if f.stat().st_mtime < too_old:
+        key = f"{f}:{f.stat().st_mtime_ns}"
+        if baseline and f.stat().st_mtime < too_old:  # recovery run only: an old file is taken as handled
+            reported[key] = {"ended": iso(ctx.now), "ignored": True}
             ctx.note(f"jobs: ignored {f.name}, older than {KEEP_DAYS} days (move it to jobs/done/)")
             continue
         try:
@@ -292,7 +288,6 @@ def check_jobs(ctx):
         except Exception as e:
             ctx.note(f"jobs: skipped {f.name}: {e}")
             continue
-        key = f"{f}:{f.stat().st_mtime_ns}"
         if reported.get(key, {}).get("ended"):
             continue
         groups.append((f, key, thread, jobs, str(data.get("next_step") or ""), f.stat().st_mtime))
@@ -308,13 +303,14 @@ def check_jobs(ctx):
         ctx.note("jobs: no jobs.command configured")
         return
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 90)))
-    if rc != 0:
+    no_jobs = bool(NO_JOBS_RE.search(out + err))  # LSF exits non-zero when it lists nothing
+    if rc != 0 and not no_jobs:
         raise RuntimeError(f"cluster command failed ({rc}): {short(err, 120)}")
     done = {s.upper() for s in sec.get("done_states") or ["DONE"]}
     failed_states = {s.upper() for s in sec.get("failed_states") or ["EXIT"]}
 
     def norm(raw):  # one internal form: DONE, FAILED, or the scheduler's own word for a job still under way
-        raw = raw.upper()
+        raw = str(raw or "").upper()
         return "FAILED" if raw in failed_states else "DONE" if raw in done else raw
 
     listed = {}
@@ -322,20 +318,29 @@ def check_jobs(ctx):
         parts = line.split()
         if len(parts) >= 2 and re.match(r"^\d+(\[\d+\])?$", parts[0]):
             listed.setdefault(parts[0].split("[")[0], []).append(norm(parts[1]))
-    if not listed:
+    if not listed and not no_jobs:
         ctx.note("jobs: the cluster listed no jobs at all (empty or partial output?). Nothing decided.")
         return
     grace = timedelta(minutes=float(sec.get("missing_grace_minutes", 30)))
+    unknown_after = timedelta(hours=float(sec.get("unknown_after_hours", 12)))
     terminal = ("DONE", "FAILED", "GONE")
     for f, key, thread, jobs, next_step, mtime in groups:
-        if not any(j in listed for j in jobs) and not all(seen_jobs.get(j, {}).get("state") in terminal[:2]
+        if not any(j in listed for j in jobs) and not all(norm(seen_jobs.get(j, {}).get("state")) in terminal[:2]
                                                          for j in jobs):
-            ctx.note(f"jobs: {f.name}: none of its jobs listed. Nothing decided.")
+            rep = reported.setdefault(key, {})
+            if ctx.now - datetime.fromtimestamp(mtime, UTC) > unknown_after and not rep.get("unknown"):
+                rep["unknown"] = rep["ended"] = iso(ctx.now)
+                if not baseline:
+                    ctx.wake(thread, "jobs", f"unknown: {f.name}: jobs {', '.join(jobs[:5])} no longer listed, "
+                                             f"check bhist/outputs.")
+                ctx.note(f"jobs: {f.name}: none of its jobs listed for over {unknown_after}: unknown")
+            else:
+                ctx.note(f"jobs: {f.name}: none of its jobs listed. Nothing decided.")
             continue
         states = {}
         for j in jobs:
             got = listed.get(j)
-            last = seen_jobs.get(j, {}).get("state")
+            last = norm(seen_jobs.get(j, {}).get("state")) or None
             if got:
                 s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else got[0]
                 seen_jobs[j] = {"state": s, "at": iso(ctx.now)}
@@ -380,7 +385,7 @@ def check_children(ctx):
     sec = ctx.section("children")
     st, baseline = ctx.check_state("children")
     seen = st.setdefault("seen", {})
-    ctx.require_indexes("children")
+    ctx.require_plans("children")
     db = ctx.db()
     failed = set(sec.get("failed_statuses") or ["failed"])
     stuck_statuses = set(sec.get("stuck_statuses") or ["preparing", "starting", "running"])
@@ -393,7 +398,7 @@ def check_children(ctx):
             run = db.execute(Q_LATEST_RUN, (tid,)).fetchone()
             if run and run[1] in failed:
                 events.append((f"run:{run[0]}", tid, f"run {run[1]}", True, run[3] or run[2]))
-    for run_id, tid, status, requested, started in db.execute(Q_ACTIVE_RUNS, ACTIVE).fetchall():
+    for run_id, tid, status, requested, started in db.execute(Q_ACTIVE_RUNS).fetchall():
         if status in stuck_statuses and ctx.now - parse_iso(started or requested) > stuck_after:
             hours = (ctx.now - parse_iso(started or requested)).total_seconds() / 3600
             events.append((f"stuck:{run_id}", tid, f"{status} for {hours:.1f} h without ending", False, None))
@@ -412,7 +417,7 @@ def check_children(ctx):
             continue
         title, parent = info
         if when:
-            if db.execute(Q_BUSY, (parent, *ACTIVE)).fetchone():
+            if db.execute(Q_BUSY, (parent,)).fetchone():
                 ctx.note(f"children: {short(title, 40)} {what}, parent busy: retried next run")
                 continue  # not marked seen: decided once the parent is idle
             prun = db.execute(Q_LATEST_RUN, (parent,)).fetchone()
@@ -501,12 +506,12 @@ def check_decision(ctx):
     st, baseline = ctx.check_state("decision")
     seen = st.setdefault("seen", {})
     prune(seen, ctx.now)  # messages older than 2 days are never looked at again, so age alone is safe here
-    ctx.require_indexes("decision")
+    ctx.require_plans("decision")
     db = ctx.db()
     after = timedelta(minutes=float(sec.get("minutes", 30)))
     oldest = iso(ctx.now - timedelta(days=2))
     for th in sec.get("threads") or [ctx.orchestrator]:
-        if not th or db.execute(Q_BUSY, (th, *ACTIVE)).fetchone():
+        if not th or db.execute(Q_BUSY, (th,)).fetchone():
             continue
         for mid, created, text in db.execute(Q_LATEST_USER_MESSAGES, (th,)).fetchall():
             text = text or ""
@@ -584,12 +589,14 @@ def send(ctx, thread, text):
         return True, "would POST to its webhook", ""
     if url:
         body = json.dumps({"text": text, "thread": thread}).encode()
-        req = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json"})
         try:
+            req = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return 200 <= r.status < 300, "webhook", f"HTTP {r.status}"
-        except Exception as e:
-            return False, "webhook", short(getattr(e, "reason", e) or e, 80)
+        except urllib.error.HTTPError as e:
+            return False, "webhook", f"HTTP {e.code}"
+        except Exception as e:  # its message may quote the URL, and the URL holds a token: report only the kind
+            return False, "webhook", f"{type(e).__name__} (details hidden, the URL holds a token)"
     if wake.get("command"):
         argv = [str(a).replace("{thread}", thread) for a in wake["command"]]
     else:
@@ -621,7 +628,8 @@ def deliver(ctx):
         by_thread.setdefault(item["thread"], []).append(item)
     for thread, items in by_thread.items():
         retry_at = max((i.get("retry_at") or "") for i in items)
-        if retry_at and iso(ctx.now) < retry_at:
+        fresh_urgent = any(i["urgent"] and not i.get("retry_at") for i in items)
+        if retry_at and iso(ctx.now) < retry_at and not fresh_urgent:
             lines_out.append(f"backing off for {thread} until {retry_at}: " + " | ".join(i["line"] for i in items))
             keep += items
             continue
@@ -715,7 +723,9 @@ def main(argv=None):
         print(f"watcher: state unreadable ({e}), starting fresh", file=sys.stderr)
         state = {}
     ctx = Ctx(now, cfg, state, args.dry_run, args.verbose, baseline=not args.no_baseline)
-    initialised = state.setdefault("initialised", [])
+    if "initialised" not in state:  # state from before this field: checks with state count as initialised
+        state["initialised"] = [n for n, _ in CHECKS if n in state]
+    initialised = state["initialised"]
     health = state.setdefault("health", {})
     budget = float(cfg.get("db_budget_ms", 2000)) / 1000
     alert_after = timedelta(minutes=float(cfg.get("fail_alert_minutes", 120)))

@@ -101,7 +101,10 @@ A job file is what a child writes before it ends its turn on a long wait:
 `{"thread": "<owner thread id>", "jobs": ["4711", "4712"], "next_step": "read results/metrics.json"}` (`jobs`
 defaults to the file name). `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
 `["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job
-file is open, and a failed command decides nothing.
+file is open, and a failed command decides nothing. "No job found" counts as an empty listing. Once a file is over
+12 h old and none of its jobs are listed any more, its owner gets one `unknown:` wake (check `bhist` or the
+outputs). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
+plain append).
 
 The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill): pick
 the most valuable reversible, in-budget item the user would be proud to find started, run it through delegates and
@@ -111,10 +114,11 @@ reversible one. Irreversible or outward-facing items wait for the user.
 Rules: at most one wake per thread per `rate_limit_minutes` (60) except disk and failures, optional `quiet_hours`
 (`{"start": "23:00", "end": "07:00"}` in `timezone`), and held wakes go out merged later. The first run of a check
 (jobs, children, decision and the behind-pace part of usage) records what already exists without waking, and only
-counts as done once it succeeded. Disk alerts even on the first run. Job files older than 14 days are ignored (the
-woken chat moves its file to `jobs/done/`). A check that keeps failing (an expired cluster login, a T3 schema change
+counts as done once it succeeded. Disk alerts even on the first run. On that first run, job files older than 14 days are taken as
+handled (the woken chat moves its file to `jobs/done/`). A check that keeps failing (an expired cluster login, a T3 schema change
 without the needed indexes, a broken usage command) wakes the orchestrator once after `fail_alert_minutes` (120).
-Undelivered wakes retry with a backoff and are dropped, with a loud log line, only after 24 h. The T3 database is opened read-only and read by indexed columns only.
+Undelivered wakes retry with a backoff and are dropped, with a loud log line, only after 24 h. The T3 database is opened read-only and read by indexed columns only: before a check runs, `EXPLAIN QUERY PLAN`
+must show no scan of a big table, or the check is skipped.
 
 How it wakes a chat: the T3 CLI, `t3 thread send --base-dir <t3_home> <thread> -` (the message on stdin, and a busy
 chat gets it as its next turn). With `t3_home` set, the watcher runs the T3 version named in

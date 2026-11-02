@@ -14,6 +14,11 @@ WATCH = REPO / "watcher" / "watch.py"
 T0 = "2026-01-07T12:00:00.000Z"  # a Wednesday
 
 
+def parse_ts(text):
+    from datetime import datetime
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+
+
 def at(minutes):
     """T0 plus minutes, as the watcher's ISO format."""
     from datetime import datetime, timedelta, timezone
@@ -343,8 +348,8 @@ def test_missing_index_skips_the_check(tmp_path):
     add_thread(conn, "lead-1", "Lead")
     rig.config(t3_db=str(db), children={}, decision={})
     p = rig.run(T0, "--verbose")
-    assert "children: error: T3 database has no index on orchestration_v2_projection_runs(status)" in p.stdout
-    assert "decision: error: T3 database has no index" in p.stdout
+    assert "children: error: query plan would scan orchestration_v2_projection_runs" in p.stdout
+    assert "decision: error: query plan would scan orchestration_v2_projection_messages" in p.stdout
     assert "children" not in rig.state()["initialised"]
 
 
@@ -691,3 +696,117 @@ def test_no_baseline_dry_run_shows_existing_events(tmp_path):
     p = rig.run(T0, "--dry-run", "--no-baseline")
     assert "would wake lead-1" in p.stdout and '"Broken child" (c1) run failed' in p.stdout
     assert not rig.state_dir.exists()
+
+
+# ---------- round 2 ----------
+
+def write_state(rig, state):
+    rig.state_dir.mkdir(parents=True, exist_ok=True)
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+
+
+def test_incompatible_partial_index_is_rejected_by_the_plan(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db, indexes=False)
+    conn.executescript(INDEXES.replace("WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')",
+                                       "WHERE status IN ('running')"))
+    add_thread(conn, "lead-1", "Lead")
+    rig.config(t3_db=str(db), children={})
+    p = rig.run(T0, "--verbose")
+    assert "children: error: query plan would scan orchestration_v2_projection_runs" in p.stdout
+    (tmp_path / "ok").mkdir()
+    rig2 = Rig(tmp_path / "ok")
+    db2 = tmp_path / "ok" / "state.sqlite"
+    make_db(db2)
+    rig2.config(t3_db=str(db2), children={}, decision={"threads": ["x"]})
+    p = rig2.run(T0, "--verbose")
+    assert "error" not in p.stdout  # the full index set passes
+
+
+def test_webhook_errors_never_leak_the_token(tmp_path):
+    token = "SYNTH-TOKEN-8f3a"
+    rig = Rig(tmp_path)
+    rig.base["wake"] = {"webhooks": {"orch-1": f"not a url/{token}?k={token}",
+                                     "lead-1": f"http://127.0.0.1:notaport/api/hooks/t/{token}"}}
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "lead-1", "Lead")
+    add_thread(conn, "c1", "Broken", parent="lead-1")
+    rig.config(t3_db=str(db), children={}, disk={"paths": [str(tmp_path)], "min_free_gb": 10**9})
+    rig.run(T0)
+    add_thread(conn, "c2", "Broken too", parent="lead-1", updated=at(10))
+    add_run(conn, "c2", 1, "failed", at(5), at(10))
+    p = rig.run(at(15), "--verbose")
+    assert "FAILED to wake orch-1" in p.stdout and "FAILED to wake lead-1" in p.stdout
+    assert "details hidden" in p.stdout
+    assert token not in p.stdout + p.stderr + (rig.state_dir / "watch.json").read_text()
+
+
+def test_cached_raw_job_states_are_normalised(tmp_path):
+    rig, listing = job_rig(tmp_path, "102 DONE\n")
+    write_state(rig, {"initialised": ["jobs"], "jobs": {"seen_jobs": {"101": {"state": "EXIT", "at": T0}}}})
+    rig.run(at(5))
+    w = rig.wakes()
+    assert len(w) == 1 and "all 2 jobs ended (DONE 1, FAILED 1)" in w[0]["text"]
+
+
+def test_old_open_job_file_is_still_tracked(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    write_state(rig, {"initialised": ["jobs"], "jobs": {}})
+    os.utime(tmp_path / "proj/.work/orchestrator/jobs/train.json", (1, 1))
+    rig.run(T0)
+    listing.write_text("101 DONE\n102 DONE\n")
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and "all 2 jobs ended (DONE 2)" in w[0]["text"]
+
+
+def test_no_job_found_counts_as_empty_and_purged_jobs_get_one_unknown_wake(tmp_path):
+    rig = Rig(tmp_path)
+    proj = tmp_path / "proj"
+    jobs = proj / ".work/orchestrator/jobs"
+    jobs.mkdir(parents=True)
+    f = jobs / "lost.json"
+    f.write_text(json.dumps({"thread": "child-5", "jobs": ["7", "8"]}))
+    os.utime(f, (parse_ts(at(-11 * 60)),) * 2)
+    lsf = rig.script("bjobs.py", "import sys\nprint('No unfinished job found', file=sys.stderr)\nsys.exit(255)\n")
+    rig.config(projects=[str(proj)], jobs={"command": lsf})
+    write_state(rig, {"initialised": ["jobs"], "jobs": {}})
+    p = rig.run(T0, "--verbose")
+    assert rig.wakes() == [] and "Nothing decided" in p.stdout and "error" not in p.stdout  # 11 h old
+    rig.run(at(65))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "child-5"
+    assert w[0]["text"].startswith("watcher: jobs: unknown: lost.json: jobs 7, 8 no longer listed, check bhist")
+    rig.run(at(80))
+    rig.run(at(200))
+    assert rig.wakes() == []
+
+
+def test_upgrade_seeds_initialised_from_existing_state(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "lead-1", "Lead")
+    add_thread(conn, "c1", "Broken", parent="lead-1")
+    add_run(conn, "c1", 1, "failed", at(-10), at(-5))
+    rig.config(t3_db=str(db), children={})
+    write_state(rig, {"children": {"seen": {}}})  # older state file, no "initialised"
+    rig.run(T0)
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "lead-1"  # not treated as a fresh baseline
+
+
+def test_new_urgent_item_skips_the_thread_backoff(tmp_path):
+    rig = Rig(tmp_path)
+    old = {"thread": "orch-1", "line": "watcher: decision: older", "urgent": False, "prompt": None,
+           "created": at(-5), "attempts": 1, "retry_at": at(10)}
+    write_state(rig, {"initialised": ["disk"], "outbox": [old]})
+    rig.config(disk={"paths": [str(tmp_path)], "min_free_gb": 0})
+    p = rig.run(T0)
+    assert rig.wakes() == [] and "backing off for orch-1" in p.stdout  # nothing new: the backoff holds
+    rig.config(disk={"paths": [str(tmp_path)], "min_free_gb": 10**9})
+    rig.run(at(1))
+    w = rig.wakes()
+    assert len(w) == 1 and "watcher: disk:" in w[0]["text"] and "older" in w[0]["text"]
