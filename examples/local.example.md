@@ -11,6 +11,9 @@ Keep it out of any repo.
 - Usage meter: `python3 ~/tools/usage_meter.py` (prints % of the 5-hour window and of the week).
 - Pace about 15 % of the week per day, at most one full 5-hour window per night or burst.
 - Ask before a programme above about 5 % of the week.
+- Optional second plan account: a second T3 provider instance of the same driver with its own config dir (for
+  Claude, `homePath` = its `CLAUDE_CONFIG_DIR`). Name which roles use it (e.g. workers and delegates, orchestrators
+  stay on the first), give each account its own pace, and list it under `watcher.usage.accounts` in `config.json`.
 
 ## Models (only the user changes these)
 - Default: Opus 5.5. Other-vendor critic: GPT Sol at medium effort.

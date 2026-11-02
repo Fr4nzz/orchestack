@@ -9,6 +9,7 @@ owns it. The same state never wakes anyone twice.
   children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread
   disk      free disk below the floor -> the orchestrator (urgent)
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
+            (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator
   hosts     a host came online -> run its copy command (no wake)
 
@@ -462,6 +463,42 @@ def check_usage(ctx):
         ctx.note("usage: no usage.command configured")
         return
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 60)))
+    ideas = sec.get("ideas_file") or (str(projects(ctx)[0] / ".work/orchestrator/IDEAS.md") if projects(ctx)
+                                      else ".work/orchestrator/IDEAS.md")
+    prompt = (sec.get("backlog_prompt") or BACKLOG_PROMPT).replace("{ideas}", ideas)
+    # The section itself describes the first account. Each entry of "accounts" is a further account read from the
+    # same meter output: its keys override the section's (name, weekly_pattern, weekly_reset, pace_per_day, ...).
+    base = {k: v for k, v in sec.items() if k != "accounts"}
+    usage_account(ctx, base, st, baseline, rc, out, err, prompt, None)
+    accounts = sec.get("accounts") or []
+    if not isinstance(accounts, list):
+        accounts = [accounts]
+    extra = st.setdefault("accounts", {}) if accounts else {}
+    seen = set()
+    for i, acc in enumerate(accounts):
+        name = acc.get("name") if isinstance(acc, dict) else None
+        label = name if isinstance(name, str) and name else f"#{i + 1}"
+        mark = len(ctx.state.setdefault("outbox", []))
+        try:  # a broken further account never blocks the first one's state or wake
+            if not isinstance(acc, dict) or not isinstance(name, str) or not name:
+                raise ValueError("each accounts entry needs a non-empty string name")
+            if name in seen:
+                raise ValueError("duplicate account name")
+            seen.add(name)
+            if not acc.get("weekly_pattern"):
+                raise ValueError("each accounts entry needs its own weekly_pattern")
+            sub = copy.deepcopy(extra.get(name) or {})
+            usage_account(ctx, {**base, **acc}, sub, baseline or "pct" not in sub, rc, out, err, prompt, name)
+            extra[name] = sub
+        except Exception as e:
+            del ctx.state["outbox"][mark:]
+            msg = f"usage {label}: error: {short(e, 160)}"
+            ctx.note(msg)
+            print(f"watcher: {msg}", file=sys.stderr)
+
+
+def usage_account(ctx, sec, st, baseline, rc, out, err, prompt, name):
+    label = f"[{name}] " if name else ""
     pattern = sec.get("weekly_pattern") or r"(?:week|seven)\D*?([0-9]+(?:\.[0-9]+)?)\s*%"
     m = re.search(pattern, out, re.I | re.M) if rc == 0 else None
     if not m:
@@ -470,14 +507,11 @@ def check_usage(ctx):
     prev = st.get("pct")
     cycle = last_weekly(ctx.now, sec["weekly_reset"], ctx.tz) if sec.get("weekly_reset") else None
     cycle_key = iso(cycle) if cycle else None
-    ideas = sec.get("ideas_file") or (str(projects(ctx)[0] / ".work/orchestrator/IDEAS.md") if projects(ctx)
-                                      else ".work/orchestrator/IDEAS.md")
-    prompt = (sec.get("backlog_prompt") or BACKLOG_PROMPT).replace("{ideas}", ideas)
     new_cycle = bool(cycle_key and st.get("cycle") and st["cycle"] != cycle_key)
     reset = prev is not None and (prev - pct >= float(sec.get("reset_drop", 20)) or (new_cycle and pct < prev))
     recent_reset = st.get("reset_at") and ctx.now - parse_iso(st["reset_at"]) < timedelta(days=5)
     if reset and not recent_reset:
-        ctx.wake(ctx.orchestrator, "usage", f"weekly usage reset ({pct:.0f} % used now, was {prev:.0f} %).",
+        ctx.wake(ctx.orchestrator, "usage", f"{label}weekly usage reset ({pct:.0f} % used now, was {prev:.0f} %).",
                  prompt=prompt)
         st["reset_at"] = st["behind_at"] = iso(ctx.now)
     elif cycle:
@@ -491,10 +525,11 @@ def check_usage(ctx):
             st["behind_at"] = iso(ctx.now)  # first run: recorded, the next wake comes after rearm_hours
         elif not st.get("behind_at") or ctx.now - parse_iso(st["behind_at"]) >= rearm:
             ctx.wake(ctx.orchestrator, "usage",
-                     f"far behind pace: {pct:.0f} % of the week used, pace says {expected:.0f} % by now.",
+                     f"{label}far behind pace: {pct:.0f} % of the week used, pace says {expected:.0f} % by now.",
                      prompt=prompt)
             st["behind_at"] = iso(ctx.now)
-        ctx.note(f"usage: {pct:.0f} % used, pace {expected:.0f} % ({days:.1f} days into the week)")
+        ctx.note(f"usage{' ' + name if name else ''}: {pct:.0f} % used, pace {expected:.0f} % "
+                 f"({days:.1f} days into the week)")
     st["pct"] = pct
     if reset or not new_cycle:  # a new cycle counts once the meter has dropped
         st["cycle"] = cycle_key

@@ -6,6 +6,8 @@
   cluster jobs (job files, owner thread woken), failed, waiting or stuck T3 children (parent woken), low disk,
   weekly usage reset or behind pace (backlog prompt), unanswered `decision:` messages, and a host-online copy hook.
   Wakes through `t3 thread send` or a scheduled-task webhook, one per change, rate-limited, quiet hours, dry run.
+- Watcher `usage.accounts`: further plan accounts read from the same meter output, each with a unique name, its own pattern, weekly
+  reset, pace and state. Their wakes start with `[name]`, and a broken entry is skipped without blocking the first account.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.

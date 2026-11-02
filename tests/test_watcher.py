@@ -532,6 +532,48 @@ def test_usage_far_behind_pace_rearms_daily(tmp_path):
     assert rig.wakes() == []
 
 
+def test_usage_second_account_has_own_state_and_label(tmp_path):
+    rig = Rig(tmp_path)
+    m1, m2 = tmp_path / "a.txt", tmp_path / "b.txt"
+    m1.write_text("80")
+    m2.write_text("70")
+    cmd = rig.script("meter.py", f"print('seven_day used', open({str(m1)!r}).read(), '%')\n"
+                                 f"print('acct2 seven_day used', open({str(m2)!r}).read(), '%')\n")
+    rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "ideas_file": "/x/I.md",
+                      "accounts": [{"name": "acct2", "weekly_pattern": r"^acct2 seven_day\s+used\s+([0-9.]+)"},
+                                   {"name": "broken", "weekly_pattern": r"^nothing ([0-9]+)"}]})
+    rig.run(T0)
+    assert rig.wakes() == []
+    m2.write_text("1")  # only the second account resets
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: [acct2] weekly usage reset (1 % used now, was 70 %).")
+    m1.write_text("2")  # the first account resets later; its state was kept despite the broken third account
+    rig.run(at(90))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: weekly usage reset (2 % used now, was 80 %).")
+
+
+
+def test_usage_broken_accounts_never_cost_the_first_account_its_wake(tmp_path):
+    rig = Rig(tmp_path)
+    m1, m2 = tmp_path / "a.txt", tmp_path / "b.txt"
+    m1.write_text("80")
+    m2.write_text("10")
+    cmd = rig.script("meter.py", f"print('seven_day used', open({str(m1)!r}).read(), '%')\n"
+                                 f"print('b seven_day used', open({str(m2)!r}).read(), '%')\n")
+    pat = r"^b seven_day\s+used\s+([0-9.]+)"
+    rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "ideas_file": "/x/I.md",
+                      "accounts": [None, {"name": "bad", "weekly_pattern": pat, "weekly_reset": "Wed"},
+                                   {"name": "nopat"}, {"name": "regex", "weekly_pattern": "(["},
+                                   {"name": "b", "weekly_pattern": pat}, {"name": "b", "weekly_pattern": "^(8)0"}]})
+    rig.run(T0)
+    assert rig.wakes() == []  # the duplicate "b" (reads 80) does not share state with the first "b" (reads 10)
+    m1.write_text("2")
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: weekly usage reset (2 % used now, was 80 %).")
+
 # ---------- delivery rules ----------
 
 def test_rate_limit_holds_and_merges(tmp_path):
