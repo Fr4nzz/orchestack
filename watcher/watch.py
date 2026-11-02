@@ -469,15 +469,20 @@ def check_usage(ctx):
     # The section itself describes the first account. Each entry of "accounts" is a further account read from the
     # same meter output: its keys override the section's (name, weekly_pattern, weekly_reset, pace_per_day, ...).
     base = {k: v for k, v in sec.items() if k != "accounts"}
-    usage_account(ctx, base, st, baseline, rc, out, err, prompt, None)
     accounts = sec.get("accounts") or []
     if not isinstance(accounts, list):
         accounts = [accounts]
+    if accounts and not sec.get("weekly_pattern"):  # the default pattern could read another account's line
+        raise ValueError("usage.weekly_pattern is required when usage.accounts is set")
+    usage_account(ctx, base, st, baseline, rc, out, err, prompt, None)
     extra = st.setdefault("accounts", {}) if accounts else {}
-    seen = set()
+    health = ctx.state.setdefault("health", {})
+    alert_after = timedelta(minutes=float(ctx.cfg.get("fail_alert_minutes", 120)))
+    seen, labels = set(), set()
     for i, acc in enumerate(accounts):
         name = acc.get("name") if isinstance(acc, dict) else None
-        label = name if isinstance(name, str) and name else f"#{i + 1}"
+        label = name if isinstance(name, str) and name and name not in seen else f"#{i + 1}"
+        labels.add(f"usage:{label}")
         mark = len(ctx.state.setdefault("outbox", []))
         try:  # a broken further account never blocks the first one's state or wake
             if not isinstance(acc, dict) or not isinstance(name, str) or not name:
@@ -490,11 +495,23 @@ def check_usage(ctx):
             sub = copy.deepcopy(extra.get(name) or {})
             usage_account(ctx, {**base, **acc}, sub, baseline or "pct" not in sub, rc, out, err, prompt, name)
             extra[name] = sub
+            health.pop(f"usage:{label}", None)
         except Exception as e:
             del ctx.state["outbox"][mark:]
             msg = f"usage {label}: error: {short(e, 160)}"
             ctx.note(msg)
             print(f"watcher: {msg}", file=sys.stderr)
+            h = health.setdefault(f"usage:{label}", {"since": iso(ctx.now)})
+            h["error"] = msg
+            if not h.get("alerted") and ctx.now - parse_iso(h["since"]) >= alert_after:
+                ctx.wake(ctx.orchestrator, "usage", "", line=f"watcher: {msg} (failing since {h['since']})")
+                h["alerted"] = iso(ctx.now)
+    for gone in [k for k in extra if k not in seen]:  # a removed or renamed account starts afresh if it returns
+        del extra[gone]
+    for gone in [k for k in health if k.startswith("usage:") and k not in labels]:
+        del health[gone]
+    if not accounts:
+        st.pop("accounts", None)
 
 
 def usage_account(ctx, sec, st, baseline, rc, out, err, prompt, name):

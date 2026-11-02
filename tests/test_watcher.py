@@ -554,7 +554,6 @@ def test_usage_second_account_has_own_state_and_label(tmp_path):
     assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: weekly usage reset (2 % used now, was 80 %).")
 
 
-
 def test_usage_broken_accounts_never_cost_the_first_account_its_wake(tmp_path):
     rig = Rig(tmp_path)
     m1, m2 = tmp_path / "a.txt", tmp_path / "b.txt"
@@ -566,13 +565,54 @@ def test_usage_broken_accounts_never_cost_the_first_account_its_wake(tmp_path):
     rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "ideas_file": "/x/I.md",
                       "accounts": [None, {"name": "bad", "weekly_pattern": pat, "weekly_reset": "Wed"},
                                    {"name": "nopat"}, {"name": "regex", "weekly_pattern": "(["},
-                                   {"name": "b", "weekly_pattern": pat}, {"name": "b", "weekly_pattern": "^(8)0"}]})
-    rig.run(T0)
-    assert rig.wakes() == []  # the duplicate "b" (reads 80) does not share state with the first "b" (reads 10)
+                                   {}, {"name": ""}, {"name": "b", "weekly_pattern": pat},
+                                   {"name": "b", "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)"}]})
+    p = rig.run(T0)
+    assert rig.wakes() == []
+    for err in ("#1: error: each accounts entry needs a non-empty string name", "bad: error:",
+                "nopat: error: each accounts entry needs its own weekly_pattern", "regex: error:",
+                "#5: error: each accounts", "#6: error: each accounts", "#8: error: duplicate account name"):
+        assert f"watcher: usage {err}" in p.stderr
+    assert rig.state()["usage"]["accounts"] == {"b": rig.state()["usage"]["accounts"]["b"]}
+    # the duplicate "b" reads 80 and the first "b" reads 10: shared state would wake a false reset on every run
     m1.write_text("2")
     rig.run(at(15))
     w = rig.wakes()
     assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: weekly usage reset (2 % used now, was 80 %).")
+    rig.run(at(30))
+    assert rig.wakes() == [] and rig.state()["usage"]["accounts"]["b"]["pct"] == 10
+
+
+def test_usage_account_added_later_records_first_and_alerts_once_when_broken(tmp_path):
+    rig, meter = usage_rig(tmp_path, 80, weekly_reset="Mon 00:00", pace_per_day=15, behind_by=20, rearm_hours=1)
+    rig.run(T0)  # the first account alone, as before accounts existed
+    usage = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]["usage"]
+    usage["accounts"] = [{"name": "acct2", "weekly_pattern": r"^five_hour used ([0-9.]+)"},
+                         {"name": "gone", "weekly_pattern": r"^missing ([0-9]+)"}]
+    rig.config(usage=usage, timezone="UTC", fail_alert_minutes=60)
+    rig.run(at(15))
+    assert rig.wakes() == []  # acct2 reads 3 %, far behind pace, but its first run only records
+    assert rig.state()["usage"]["accounts"]["acct2"]["pct"] == 3
+    rig.run(at(80))
+    w = rig.wakes()
+    assert len(w) == 1 and "[acct2] far behind pace: 3 %" in w[0]["text"]  # one wake per thread per run
+    assert "watcher: usage gone: error: no weekly percentage read" in w[0]["text"]
+    rig.run(at(110))
+    assert rig.wakes() == []  # the broken entry alerts only once, the pace wake waits rearm_hours again
+    usage["accounts"] = usage["accounts"][:1]
+    rig.config(usage=usage, timezone="UTC")
+    rig.run(at(150))
+    assert "usage:gone" not in rig.state().get("health", {})
+
+
+def test_usage_accounts_need_explicit_first_pattern(tmp_path):
+    rig, meter = usage_rig(tmp_path, 80)
+    usage = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]["usage"]
+    del usage["weekly_pattern"]
+    usage["accounts"] = [{"name": "acct2", "weekly_pattern": r"^five_hour used ([0-9.]+)"}]
+    rig.config(usage=usage)
+    p = rig.run(T0)
+    assert "usage: error: usage.weekly_pattern is required when usage.accounts is set" in p.stderr
 
 # ---------- delivery rules ----------
 
