@@ -21,9 +21,12 @@ stay in an outbox and go out merged with later ones.
 --dry-run prints what it would do and changes nothing (no state written, no wake sent, no command run except the
 read-only checks). Config: the "watcher" section of config.json in $ORCHESTACK_CONFIG_DIR or ~/.config/orchestack.
 State: watch.json in $ORCHESTACK_STATE_DIR or ~/.local/state/orchestack. The T3 database is opened read-only and is
-read by indexed columns only (it can be tens of GB). Exit 0 unless the config is unreadable.
+read by indexed columns only (it can be tens of GB): a check whose indexes are missing is skipped, and its
+queries are aborted after db_budget_ms (2000). A check that keeps failing for fail_alert_minutes (120) wakes the
+orchestrator once. Exit 0 unless the config is unreadable.
 """
 import argparse
+import copy
 import fcntl
 import json
 import os
@@ -32,6 +35,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,13 +45,16 @@ UTC = timezone.utc
 ACTIVE = ("queued", "preparing", "starting", "running", "waiting")
 DECISION_RE = re.compile(r"^\s*[*_>]*\s*decision:", re.I | re.M)
 KEEP_DAYS = 14
-MAX_ATTEMPTS = 5
+OUTBOX_MAX_HOURS = 24
+THREAD_ID_RE = re.compile(r"^[A-Za-z0-9:_%.][A-Za-z0-9:_%.-]*$")
 
 BACKLOG_PROMPT = (
     "Budget is unused. Read {ideas} (format: orchestrator skill, Backlog). Pick the most valuable reversible,"
-    " in-budget item the user would be proud to find started, run it through delegates, and report afterwards."
-    " If the backlog is empty, look for ideas left unexecuted in the notes file and recent chats, propose 3 ideas"
-    " grounded in the project's current state, add them to IDEAS.md and start the best reversible one."
+    " in-budget item the user would be proud to find started, price it with a small pilot, run it through"
+    " delegates, and report afterwards. Ask before anything over the ask threshold in local.md."
+    " If the backlog is empty, look for ideas left unexecuted in the notes file, IDEAS.md and the last 3 days of"
+    " chats (no further back), propose 3 ideas grounded in the project's current state, add them to IDEAS.md and"
+    " start the best reversible one."
     " Irreversible or outward-facing items wait for the user."
 )
 
@@ -85,6 +92,17 @@ Q_ANSWERED_AFTER = (
     "SELECT 1 FROM orchestration_v2_projection_messages"
     " WHERE thread_id = ? AND created_at > ? AND role = 'assistant' AND streaming = 0 LIMIT 1"
 )
+
+T, R, RQ, M = ("orchestration_v2_projection_threads", "orchestration_v2_projection_runs",
+               "orchestration_v2_projection_runtime_requests", "orchestration_v2_projection_messages")
+# Indexes each check's queries need: (table, leading columns, text the index's WHERE clause must contain or None).
+# Without them a query could scan the whole database, so the check is skipped instead.
+REQUIRED_INDEXES = {
+    "children": [(T, ("thread_id",), None), (T, ("project_id", "updated_at"), None), (R, ("thread_id", "ordinal"), None),
+                 (R, ("status",), "status in"), (RQ, ("thread_id",), "status = 'pending'")],
+    "decision": [(R, ("thread_id",), None), (M, ("thread_id", "updated_at"), "role = 'user'"),
+                 (M, ("thread_id", "created_at"), None)],
+}
 
 
 # ---------- small helpers ----------
@@ -160,6 +178,7 @@ class Ctx:
         self.baseline = baseline
         self.notes = []
         self._db = None
+        self.work, self.first, self.deadline = {}, False, None
         self.tz = tzinfo(cfg.get("timezone"))
 
     def section(self, name):
@@ -170,16 +189,16 @@ class Ctx:
         self.notes.append(text)
 
     def check_state(self, name):
-        """(state dict for a check, baseline flag). The first run of a check records what exists without waking."""
-        baseline = self.baseline and name not in self.state
-        return self.state.setdefault(name, {}), baseline
+        """(working copy of a check's state, baseline flag). main() keeps the copy only if the check succeeds, and
+        a check counts as initialised only after one successful run. The first run records without waking."""
+        return self.work, self.first
 
-    def wake(self, thread, check, text, urgent=False, prompt=None):
-        if not thread:
-            self.note(f"{check}: no thread to wake for: {text}")
+    def wake(self, thread, check, text, urgent=False, prompt=None, line=None):
+        if not thread or not THREAD_ID_RE.match(str(thread)):
+            self.note(f"{check}: no valid thread to wake for: {text}")
             return
         self.state.setdefault("outbox", []).append({
-            "thread": thread, "line": f"watcher: {check}: {text}", "urgent": bool(urgent),
+            "thread": thread, "line": line or f"watcher: {check}: {text}", "urgent": bool(urgent),
             "prompt": prompt, "created": iso(self.now), "attempts": 0,
         })
 
@@ -203,7 +222,28 @@ class Ctx:
                 raise RuntimeError(f"no T3 database at {path}")
             self._db = sqlite3.connect(f"file:{quote(path)}?mode=ro", uri=True, timeout=5)
             self._db.execute("PRAGMA query_only = 1")
+            self._db.set_progress_handler(
+                lambda: 1 if self.deadline is not None and time.monotonic() > self.deadline else 0, 1000)
         return self._db
+
+    def require_indexes(self, check):
+        """Raise unless every index the check's queries need exists (names may change, columns may not)."""
+        db = self.db()
+        for table, cols, where in REQUIRED_INDEXES.get(check, []):
+            ok = False
+            for row in db.execute(f"PRAGMA index_list('{table}')").fetchall():
+                name = row[1]
+                got = tuple(r[2] for r in db.execute(f"PRAGMA index_info('{name}')").fetchall())
+                if got[: len(cols)] != cols:
+                    continue
+                sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", (name,))
+                       .fetchone() or [None])[0] or ""
+                if where is None or where in " ".join(sql.lower().split()):
+                    ok = True
+                    break
+            if not ok:
+                raise RuntimeError(f"T3 database has no index on {table}({', '.join(cols)})"
+                                   + (f" WHERE {where}" if where else "") + ", skipped to avoid a full scan")
 
     def close(self):
         if self._db is not None:
@@ -221,9 +261,10 @@ def projects(ctx):
     return [Path(os.path.expanduser(p)) for p in ctx.cfg.get("projects") or []]
 
 
-def prune(seen, now, days=KEEP_DAYS):
+def prune(seen, now, active=(), days=KEEP_DAYS):
+    """Forget resolved events (not in active) older than days. Active events are kept, so they never wake again."""
     cutoff = iso(now - timedelta(days=days))
-    for key in [k for k, v in seen.items() if (v.get("at") if isinstance(v, dict) else v) < cutoff]:
+    for key in [k for k, v in seen.items() if k not in active and (v.get("at") if isinstance(v, dict) else v) < cutoff]:
         del seen[key]
 
 
@@ -232,14 +273,18 @@ def prune(seen, now, days=KEEP_DAYS):
 def check_jobs(ctx):
     """Cluster jobs listed in job files ended (all of a file's jobs) or one failed. Wakes the file's owner thread."""
     sec = ctx.section("jobs")
-    st, _ = ctx.check_state("jobs")
+    st, baseline = ctx.check_state("jobs")
     reported = st.setdefault("reported", {})
     seen_jobs = st.setdefault("seen_jobs", {})
     dirs = [p / ".work" / "orchestrator" / "jobs" for p in projects(ctx)]
     dirs += [Path(os.path.expanduser(d)) for d in sec.get("dirs") or []]
     files = sorted(f for d in dirs if d.is_dir() for f in d.glob("*.json"))
     groups = []
+    too_old = (ctx.now - timedelta(days=KEEP_DAYS)).timestamp()
     for f in files:
+        if f.stat().st_mtime < too_old:
+            ctx.note(f"jobs: ignored {f.name}, older than {KEEP_DAYS} days (move it to jobs/done/)")
+            continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             thread = str(data["thread"])
@@ -254,7 +299,7 @@ def check_jobs(ctx):
     live = {f"{f}:{f.stat().st_mtime_ns}" for f in files}
     for key in [k for k in reported if k not in live]:
         del reported[key]
-    prune(seen_jobs, ctx.now)
+    prune(seen_jobs, ctx.now, active={j for g in groups for j in g[3]})
     if not groups:
         ctx.note(f"jobs: nothing open ({len(files)} job files)")
         return
@@ -264,36 +309,54 @@ def check_jobs(ctx):
         return
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 90)))
     if rc != 0:
-        ctx.note(f"jobs: cluster command failed ({rc}): {short(err, 120)}. Nothing decided.")
-        return
+        raise RuntimeError(f"cluster command failed ({rc}): {short(err, 120)}")
+    done = {s.upper() for s in sec.get("done_states") or ["DONE"]}
+    failed_states = {s.upper() for s in sec.get("failed_states") or ["EXIT"]}
+
+    def norm(raw):  # one internal form: DONE, FAILED, or the scheduler's own word for a job still under way
+        raw = raw.upper()
+        return "FAILED" if raw in failed_states else "DONE" if raw in done else raw
+
     listed = {}
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 2 and re.match(r"^\d+(\[\d+\])?$", parts[0]):
-            listed.setdefault(parts[0].split("[")[0], []).append(parts[1].upper())
-    done = {s.upper() for s in sec.get("done_states") or ["DONE"]}
-    failed_states = {s.upper() for s in sec.get("failed_states") or ["EXIT"]}
+            listed.setdefault(parts[0].split("[")[0], []).append(norm(parts[1]))
+    if not listed:
+        ctx.note("jobs: the cluster listed no jobs at all (empty or partial output?). Nothing decided.")
+        return
     grace = timedelta(minutes=float(sec.get("missing_grace_minutes", 30)))
+    terminal = ("DONE", "FAILED", "GONE")
     for f, key, thread, jobs, next_step, mtime in groups:
+        if not any(j in listed for j in jobs) and not all(seen_jobs.get(j, {}).get("state") in terminal[:2]
+                                                         for j in jobs):
+            ctx.note(f"jobs: {f.name}: none of its jobs listed. Nothing decided.")
+            continue
         states = {}
         for j in jobs:
             got = listed.get(j)
+            last = seen_jobs.get(j, {}).get("state")
             if got:
-                s = next((x for x in got if x in failed_states), None)
-                s = s or ("DONE" if all(x in done for x in got) else got[0])
+                s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else got[0]
                 seen_jobs[j] = {"state": s, "at": iso(ctx.now)}
-            elif j in seen_jobs or ctx.now - datetime.fromtimestamp(mtime, UTC) > grace:
-                s = "GONE"  # no longer (or never) listed: the scheduler forgot it
+            elif last in ("DONE", "FAILED"):
+                s = last  # ended earlier, since dropped from the listing
+            elif last or ctx.now - datetime.fromtimestamp(mtime, UTC) > grace:
+                s = "GONE"  # others are listed but this one no longer (or never) is: the scheduler forgot it
             else:
                 s = "UNLISTED"
             states[j] = s
-        bad = [j for j, s in states.items() if s in failed_states]
-        ended = all(s in done or s in failed_states or s == "GONE" for s in states.values())
+        bad = [j for j, s in states.items() if s == "FAILED"]
+        ended = all(s in terminal for s in states.values())
         rep = reported.setdefault(key, {})
         nxt = f" Next step: {short(next_step, 160)}" if next_step else ""
         counts = ", ".join(f"{s} {n}" for s, n in sorted(_count(states.values()).items()))
+        if baseline and (bad or ended):
+            rep.update(failed=iso(ctx.now), ended=iso(ctx.now) if ended else None)
+            ctx.note(f"jobs: {f.name} -> {counts} (baseline, recorded without waking)")
+            continue
         if bad and not rep.get("failed") and not ended:
-            running = sum(1 for s in states.values() if s not in done and s not in failed_states and s != "GONE")
+            running = sum(1 for s in states.values() if s not in terminal)
             ctx.wake(thread, "jobs", f"{f.name}: job {', '.join(bad[:5])} failed ({running} still running).{nxt}",
                      urgent=True)
             rep["failed"] = iso(ctx.now)
@@ -317,7 +380,7 @@ def check_children(ctx):
     sec = ctx.section("children")
     st, baseline = ctx.check_state("children")
     seen = st.setdefault("seen", {})
-    prune(seen, ctx.now)
+    ctx.require_indexes("children")
     db = ctx.db()
     failed = set(sec.get("failed_statuses") or ["failed"])
     stuck_statuses = set(sec.get("stuck_statuses") or ["preparing", "starting", "running"])
@@ -339,23 +402,29 @@ def check_children(ctx):
         if age > approval_after:
             what = "waiting on an approval" if kind != "user_input" else "waiting on an answer"
             events.append((f"req:{rid}", tid, f"{what} for {int(age.total_seconds() // 60)} min", False, None))
+    prune(seen, ctx.now, active={e[0] for e in events})
     for key, tid, what, urgent, when in events:
         if key in seen:
             continue
-        seen[key] = iso(ctx.now)
         info = ctx.thread(tid)
-        if baseline or not info or not info[1]:
+        if baseline or not info or not info[1] or not ctx.thread(info[1]):
+            seen[key] = iso(ctx.now)
             continue
         title, parent = info
-        if not ctx.thread(parent):
-            continue
         if when:
+            if db.execute(Q_BUSY, (parent, *ACTIVE)).fetchone():
+                ctx.note(f"children: {short(title, 40)} {what}, parent busy: retried next run")
+                continue  # not marked seen: decided once the parent is idle
             prun = db.execute(Q_LATEST_RUN, (parent,)).fetchone()
             if prun and prun[2] > when:
+                seen[key] = iso(ctx.now)
                 ctx.note(f"children: {short(title, 40)} {what}, parent already ran after it")
                 continue
+        seen[key] = iso(ctx.now)
+        reason = key.split(":")[0]
+        reason = {"run": "failed", "req": "approval"}.get(reason, reason)
         ctx.note(f"children: {short(title, 40)} ({tid}) {what} -> wake {parent}")
-        ctx.wake(parent, "children", f'failed: "{short(title, 60)}" ({tid}) {what}.', urgent=urgent)
+        ctx.wake(parent, "children", f'{reason}: "{short(title, 60)}" ({tid}) {what}.', urgent=urgent)
     ctx.note(f"children: {len(events)} open events" + (" (baseline, recorded without waking)" if baseline else ""))
 
 
@@ -382,7 +451,7 @@ def check_disk(ctx):
 def check_usage(ctx):
     """Weekly reset happened, or usage far behind pace. Wakes the orchestrator with the backlog prompt."""
     sec = ctx.section("usage")
-    st, _ = ctx.check_state("usage")
+    st, baseline = ctx.check_state("usage")
     cmd = sec.get("command")
     if not cmd:
         ctx.note("usage: no usage.command configured")
@@ -391,8 +460,7 @@ def check_usage(ctx):
     pattern = sec.get("weekly_pattern") or r"(?:week|seven)\D*?([0-9]+(?:\.[0-9]+)?)\s*%"
     m = re.search(pattern, out, re.I | re.M) if rc == 0 else None
     if not m:
-        ctx.note(f"usage: no weekly percentage read (rc {rc}): {short(err or out, 120)}")
-        return
+        raise RuntimeError(f"no weekly percentage read (rc {rc}): {short(err or out, 120)}")
     pct = float(m.group(1))
     prev = st.get("pct")
     cycle = last_weekly(ctx.now, sec["weekly_reset"], ctx.tz) if sec.get("weekly_reset") else None
@@ -402,11 +470,11 @@ def check_usage(ctx):
     prompt = (sec.get("backlog_prompt") or BACKLOG_PROMPT).replace("{ideas}", ideas)
     new_cycle = bool(cycle_key and st.get("cycle") and st["cycle"] != cycle_key)
     reset = prev is not None and (prev - pct >= float(sec.get("reset_drop", 20)) or (new_cycle and pct < prev))
-    if reset and st.get("reset_woken") != (cycle_key or iso(ctx.now)):
+    recent_reset = st.get("reset_at") and ctx.now - parse_iso(st["reset_at"]) < timedelta(days=5)
+    if reset and not recent_reset:
         ctx.wake(ctx.orchestrator, "usage", f"weekly usage reset ({pct:.0f} % used now, was {prev:.0f} %).",
                  prompt=prompt)
-        st["reset_woken"] = cycle_key or iso(ctx.now)
-        st["behind_at"] = iso(ctx.now)
+        st["reset_at"] = st["behind_at"] = iso(ctx.now)
     elif cycle:
         days = (ctx.now - cycle).total_seconds() / 86400
         expected = min(100.0, float(sec.get("pace_per_day", 15)) * days)
@@ -414,6 +482,8 @@ def check_usage(ctx):
         rearm = timedelta(hours=float(sec.get("rearm_hours", 24)))
         if not behind:
             st["behind_at"] = None
+        elif baseline:
+            st["behind_at"] = iso(ctx.now)  # first run: recorded, the next wake comes after rearm_hours
         elif not st.get("behind_at") or ctx.now - parse_iso(st["behind_at"]) >= rearm:
             ctx.wake(ctx.orchestrator, "usage",
                      f"far behind pace: {pct:.0f} % of the week used, pace says {expected:.0f} % by now.",
@@ -430,7 +500,8 @@ def check_decision(ctx):
     sec = ctx.section("decision")
     st, baseline = ctx.check_state("decision")
     seen = st.setdefault("seen", {})
-    prune(seen, ctx.now)
+    prune(seen, ctx.now)  # messages older than 2 days are never looked at again, so age alone is safe here
+    ctx.require_indexes("decision")
     db = ctx.db()
     after = timedelta(minutes=float(sec.get("minutes", 30)))
     oldest = iso(ctx.now - timedelta(days=2))
@@ -523,23 +594,37 @@ def send(ctx, thread, text):
         argv = [str(a).replace("{thread}", thread) for a in wake["command"]]
     else:
         base = ["--base-dir", ctx.t3_home()] if ctx.t3_home() else []
-        argv = [t3_bin(ctx), "thread", "send", *base, thread, "-"]
+        argv = [t3_bin(ctx), "thread", "send", *base, "--", thread, "-"]
     if ctx.dry:
-        return True, "would run " + " ".join(argv[:3] + ["...", thread, "-"]), ""
+        return True, "would run " + " ".join(argv[:3] + ["...", "--", thread, "-"]), ""
     rc, _, err = run_cmd(argv, timeout, stdin=text)
     return rc == 0, "t3 thread send", short(err, 120)
 
 
 def deliver(ctx):
+    """Send the outbox, one merged message per thread. Undelivered wakes retry with a backoff (15 min doubling, at
+    most 1 h) and are dropped, loudly, only when OUTBOX_MAX_HOURS old."""
     outbox = ctx.state.setdefault("outbox", [])
     sent = ctx.state.setdefault("sent", {})
     rate = timedelta(minutes=float(ctx.cfg.get("rate_limit_minutes", 60)))
     quiet = in_quiet(ctx)
     keep, lines_out = [], []
     by_thread = {}
+    expired = iso(ctx.now - timedelta(hours=OUTBOX_MAX_HOURS))
     for item in outbox:
+        if item["created"] < expired:
+            kind = "URGENT wake" if item["urgent"] else "wake"
+            msg = f"watcher: DROPPED {kind} for {item['thread']}, undelivered for {OUTBOX_MAX_HOURS} h: {item['line']}"
+            print(msg, file=sys.stderr)
+            lines_out.append(msg)
+            continue
         by_thread.setdefault(item["thread"], []).append(item)
     for thread, items in by_thread.items():
+        retry_at = max((i.get("retry_at") or "") for i in items)
+        if retry_at and iso(ctx.now) < retry_at:
+            lines_out.append(f"backing off for {thread} until {retry_at}: " + " | ".join(i["line"] for i in items))
+            keep += items
+            continue
         urgent = any(i["urgent"] for i in items)
         last = sent.get(thread)
         limited = bool(last) and ctx.now - parse_iso(last) < rate
@@ -551,19 +636,24 @@ def deliver(ctx):
         lines = list(dict.fromkeys(i["line"] for i in items))
         prompts = list(dict.fromkeys(i["prompt"] for i in items if i.get("prompt")))
         text = "\n".join(lines) + ("\n\n" + "\n\n".join(prompts) if prompts else "")
-        ok, how, err = send(ctx, thread, text)
+        try:
+            ok, how, err = send(ctx, thread, text)
+        except Exception as e:  # one thread's failure must not stop the others or the state save
+            ok, how, err = False, "send", short(e, 120)
         if ok:
             sent[thread] = iso(ctx.now)
             verb = "would wake" if ctx.dry else "woke"
             lines_out.append(f"{verb} {thread} via {how}:\n  " + text.replace("\n", "\n  "))
         else:
+            attempts = max(i.get("attempts", 0) for i in items) + 1
+            retry = iso(ctx.now + timedelta(minutes=min(60, 15 * 2 ** (attempts - 1))))
             for i in items:
-                i["attempts"] = i.get("attempts", 0) + 1
-            kept = [i for i in items if i["attempts"] < MAX_ATTEMPTS]
-            lines_out.append(f"FAILED to wake {thread} via {how}: {err}"
-                             + ("" if len(kept) == len(items) else f" (dropped {len(items) - len(kept)} after "
-                                                                    f"{MAX_ATTEMPTS} attempts)"))
-            keep += kept
+                i["attempts"], i["retry_at"] = attempts, retry
+            msg = f"FAILED to wake {thread} via {how} (attempt {attempts}, retry after {retry}): {err}"
+            if urgent:
+                print("watcher: " + msg, file=sys.stderr)
+            lines_out.append(msg)
+            keep += items
     ctx.state["outbox"] = keep
     cutoff = iso(ctx.now - timedelta(days=KEEP_DAYS))
     ctx.state["sent"] = {t: v for t, v in sent.items() if v >= cutoff}
@@ -625,15 +715,37 @@ def main(argv=None):
         print(f"watcher: state unreadable ({e}), starting fresh", file=sys.stderr)
         state = {}
     ctx = Ctx(now, cfg, state, args.dry_run, args.verbose, baseline=not args.no_baseline)
+    initialised = state.setdefault("initialised", [])
+    health = state.setdefault("health", {})
+    budget = float(cfg.get("db_budget_ms", 2000)) / 1000
+    alert_after = timedelta(minutes=float(cfg.get("fail_alert_minutes", 120)))
     for name, fn in CHECKS:
         sec = cfg.get(name)
         if sec is None or (isinstance(sec, dict) and sec.get("enabled") is False):
             continue
+        ctx.work = copy.deepcopy(state.get(name) or {})
+        ctx.first = ctx.baseline and name not in initialised
+        mark = len(state.setdefault("outbox", []))
+        ctx.deadline = time.monotonic() + budget
         try:
             fn(ctx)
         except Exception as e:
-            ctx.note(f"{name}: error: {short(e, 160)}")
-            print(f"watcher: {name}: error: {short(e, 160)}", file=sys.stderr)
+            del state["outbox"][mark:]  # a failed check decides nothing: its state and wakes are discarded
+            err = short(e, 160)
+            ctx.note(f"{name}: error: {err}")
+            print(f"watcher: {name}: error: {err}", file=sys.stderr)
+            h = health.setdefault(name, {"since": iso(now)})
+            h["error"] = err
+            if not h.get("alerted") and now - parse_iso(h["since"]) >= alert_after:
+                ctx.wake(ctx.orchestrator, name, "", line=f"watcher: {name} failing since {h['since']}: {err}")
+                h["alerted"] = iso(now)
+            continue
+        finally:
+            ctx.deadline = None
+        state[name] = ctx.work
+        if name not in initialised:
+            initialised.append(name)
+        health.pop(name, None)
     ctx.close()
     out = deliver(ctx)
     state["last_run"] = iso(now)

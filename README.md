@@ -110,7 +110,11 @@ reversible one. Irreversible or outward-facing items wait for the user.
 
 Rules: at most one wake per thread per `rate_limit_minutes` (60) except disk and failures, optional `quiet_hours`
 (`{"start": "23:00", "end": "07:00"}` in `timezone`), and held wakes go out merged later. The first run of a check
-records what already exists without waking. The T3 database is opened read-only and read by indexed columns only.
+(jobs, children, decision and the behind-pace part of usage) records what already exists without waking, and only
+counts as done once it succeeded. Disk alerts even on the first run. Job files older than 14 days are ignored (the
+woken chat moves its file to `jobs/done/`). A check that keeps failing (an expired cluster login, a T3 schema change
+without the needed indexes, a broken usage command) wakes the orchestrator once after `fail_alert_minutes` (120).
+Undelivered wakes retry with a backoff and are dropped, with a loud log line, only after 24 h. The T3 database is opened read-only and read by indexed columns only.
 
 How it wakes a chat: the T3 CLI, `t3 thread send --base-dir <t3_home> <thread> -` (the message on stdin, and a busy
 chat gets it as its next turn). With `t3_home` set, the watcher runs the T3 version named in

@@ -66,7 +66,17 @@ class Rig:
         return [sys.executable, str(path)]
 
 
-def make_db(path):
+INDEXES = """
+    CREATE INDEX r_status ON orchestration_v2_projection_runs(status, thread_id)
+        WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting');
+    CREATE INDEX rq_pending ON orchestration_v2_projection_runtime_requests(thread_id) WHERE status = 'pending';
+    CREATE INDEX m_user ON orchestration_v2_projection_messages(thread_id, updated_at DESC, message_id DESC)
+        WHERE role = 'user';
+    CREATE INDEX m_created ON orchestration_v2_projection_messages(thread_id, created_at, message_id);
+"""
+
+
+def make_db(path, indexes=True):
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE projection_projects (project_id TEXT PRIMARY KEY, deleted_at TEXT);
@@ -82,6 +92,8 @@ def make_db(path):
             streaming INTEGER, created_at TEXT, updated_at TEXT, payload_json TEXT);
         INSERT INTO projection_projects VALUES ('p1', NULL);
     """)
+    if indexes:
+        conn.executescript(INDEXES)
     conn.commit()
     return conn
 
@@ -147,15 +159,68 @@ def test_jobs_failure_is_urgent_and_forgotten_jobs_count_as_ended(tmp_path):
     rig.run(at(15))
     w = rig.wakes()
     assert len(w) == 1 and "job 101 failed (1 still running)" in w[0]["text"]
-    listing.write_text("102 RUN\n")  # 101 dropped out of the listing
+    listing.write_text("102 RUN\n")  # 101 dropped out of the listing: its EXIT is remembered
     rig.run(at(30))
     assert rig.wakes() == []
-    listing.write_text("")
+    listing.write_text("102 DONE\n999 RUN\n")
     rig.run(at(45))  # all ended, but within an hour of the failure wake: held by the rate limit
     assert rig.wakes() == []
     rig.run(at(80))
     w = rig.wakes()
-    assert len(w) == 1 and "all 2 jobs ended (GONE 2)" in w[0]["text"] and "check the job's output" in w[0]["text"]
+    assert len(w) == 1 and "all 2 jobs ended (DONE 1, FAILED 1)" in w[0]["text"]
+
+
+def test_jobs_gone_only_while_other_jobs_are_listed(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    rig.run(T0)
+    listing.write_text("")  # rc 0 but no output: decide nothing
+    p = rig.run(at(15), "--verbose")
+    assert rig.wakes() == [] and "listed no jobs at all" in p.stdout
+    listing.write_text("555 RUN\n")  # other jobs listed, but none of this file's: decide nothing
+    p = rig.run(at(30), "--verbose")
+    assert rig.wakes() == [] and "none of its jobs listed" in p.stdout
+    listing.write_text("102 DONE\n")
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"] and "check the job's output" in w[0]["text"]
+
+
+def test_jobs_custom_states_share_one_terminal_form(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUNNING\n102 PENDING\n")
+    cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+    cfg["jobs"].update(done_states=["completed"], failed_states=["FAILED", "TIMEOUT"])
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    rig.run(T0)
+    listing.write_text("101 COMPLETED\n102 COMPLETED\n")
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and "all 2 jobs ended (DONE 2)" in w[0]["text"]
+
+
+def test_jobs_old_files_ignored_and_baseline_records_ended(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 DONE\n102 DONE\n")
+    jobs = tmp_path / "proj" / ".work" / "orchestrator" / "jobs"
+    old = jobs / "old.json"
+    old.write_text(json.dumps({"thread": "child-9", "jobs": ["101"]}))
+    os.utime(old, (1, 1))
+    p = rig.run(T0, "--verbose")  # first run (state lost): ended files recorded, not woken
+    assert rig.wakes() == [] and "ignored old.json" in p.stdout and "baseline" in p.stdout
+    rig.run(at(15))
+    assert rig.wakes() == []
+    (jobs / "new.json").write_text(json.dumps({"thread": "child-8", "jobs": ["102"]}))
+    rig.run(at(30))
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == ["child-8"]
+
+
+def test_jobs_invalid_owner_thread_is_never_put_in_argv(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    (tmp_path / "proj/.work/orchestrator/jobs/train.json").write_text(json.dumps({"thread": "--help",
+                                                                               "jobs": ["101", "102"]}))
+    rig.run(T0)
+    listing.write_text("101 DONE\n102 DONE\n")
+    p = rig.run(at(15), "--verbose")
+    assert rig.wakes() == [] and "no valid thread" in p.stdout
 
 
 def test_jobs_cluster_unreachable_decides_nothing(tmp_path):
@@ -231,8 +296,106 @@ def test_children_approval_and_stuck(tmp_path):
     rig.run(at(20))
     w = rig.wakes()
     assert len(w) == 1 and w[0]["thread"] == "lead-1"
-    assert "waiting on an approval for 15 min" in w[0]["text"] and "running for 3.2 h" in w[0]["text"]
-    assert w[0]["text"].count("watcher: children: failed:") == 2  # merged into one wake
+    assert 'watcher: children: approval: "Needs approval" (c-a) waiting on an approval for 15 min.' in w[0]["text"]
+    assert 'watcher: children: stuck: "Long run" (c-s) running for 3.2 h' in w[0]["text"]  # merged into one wake
+
+
+def test_children_active_events_survive_the_prune(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "lead-1", "Lead: app")
+    add_thread(conn, "c-a", "Needs approval", parent="lead-1")
+    rig.config(t3_db=str(db), children={}, rate_limit_minutes=0)
+    rig.run(T0)
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES ('rq1', 'c-a', 'command', "
+                 "'pending', ?)", (at(1),))
+    conn.commit()
+    rig.run(at(15))
+    assert len(rig.wakes()) == 1
+    rig.run(at(15 * 24 * 60))  # still pending 15 days later: not woken again
+    assert rig.wakes() == []
+
+
+def test_children_failure_waits_while_parent_is_busy(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "lead-1", "Lead: app")
+    add_run(conn, "lead-1", 1, "running", at(-5))
+    rig.config(t3_db=str(db), children={})
+    rig.run(T0)
+    add_thread(conn, "c1", "Broken", parent="lead-1", updated=at(10))
+    add_run(conn, "c1", 1, "failed", at(5), at(10))
+    rig.run(at(15))
+    assert rig.wakes() == []
+    conn.execute("UPDATE orchestration_v2_projection_runs SET status = 'completed' WHERE thread_id = 'lead-1'")
+    conn.commit()
+    rig.run(at(30))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["text"].startswith('watcher: children: failed: "Broken" (c1) run failed.')
+
+
+def test_missing_index_skips_the_check(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db, indexes=False)
+    add_thread(conn, "lead-1", "Lead")
+    rig.config(t3_db=str(db), children={}, decision={})
+    p = rig.run(T0, "--verbose")
+    assert "children: error: T3 database has no index on orchestration_v2_projection_runs(status)" in p.stdout
+    assert "decision: error: T3 database has no index" in p.stdout
+    assert "children" not in rig.state()["initialised"]
+
+
+def test_db_deadline_aborts_slow_queries(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    conn.executemany("INSERT INTO orchestration_v2_projection_threads VALUES (?, 'p1', 'x', ?, NULL, NULL, '{}')",
+                     [(f"t{i}", at(-1)) for i in range(3000)])
+    conn.commit()
+    rig.config(t3_db=str(db), children={}, db_budget_ms=0)
+    p = rig.run(T0, "--verbose")
+    assert "children: error: interrupted" in p.stdout
+
+
+def test_baseline_only_after_a_successful_run(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    rig.config(t3_db=str(db), children={})
+    rig.run(T0)  # no database yet: the check fails and stays uninitialised
+    assert "children" not in rig.state()["initialised"]
+    conn = make_db(db)
+    add_thread(conn, "lead-1", "Lead")
+    add_thread(conn, "old", "Old failure", parent="lead-1")
+    add_run(conn, "old", 1, "failed", at(-30), at(-20))
+    rig.run(at(15))
+    assert rig.wakes() == []  # the first successful run is the baseline
+    assert "children" in rig.state()["initialised"]
+
+
+def test_failing_check_alerts_once_and_rearms(tmp_path):
+    rig = Rig(tmp_path)
+    flag = tmp_path / "broken"
+    flag.write_text("")
+    meter = rig.script("m.py", f"import os, sys\nif os.path.exists({str(flag)!r}): sys.exit(1)\nprint('week 50 %')\n")
+    rig.config(usage={"command": meter})
+    rig.run(T0)
+    rig.run(at(60))
+    assert rig.wakes() == []
+    rig.run(at(125))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert w[0]["text"].startswith("watcher: usage failing since 2026-01-07T12:00:00.000Z: no weekly percentage")
+    rig.run(at(200))
+    assert rig.wakes() == []  # once per streak
+    flag.unlink()
+    rig.run(at(215))
+    flag.write_text("")
+    rig.run(at(230))
+    rig.run(at(360))
+    assert len(rig.wakes()) == 1  # re-armed after a success
 
 
 def test_db_is_opened_read_only(tmp_path):
@@ -323,9 +486,29 @@ def test_usage_reset_sends_backlog_prompt_once(tmp_path):
     w = rig.wakes()
     assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: weekly usage reset (1 % used now, was 80 %).")
     assert "/x/IDEAS.md" in w[0]["text"] and "proud" in w[0]["text"] and "wait for the user" in w[0]["text"]
+    assert "small pilot" in w[0]["text"] and "ask threshold in local.md" in w[0]["text"]
+    assert "last 3 days" in w[0]["text"]
     rig.run(at(30))
     rig.run(at(300))
     assert rig.wakes() == []
+
+
+def test_usage_no_second_reset_within_five_days(tmp_path):
+    rig, meter = usage_rig(tmp_path, 80)
+    rig.run(T0)
+    meter.write_text("1")
+    rig.run(at(15))
+    assert len(rig.wakes()) == 1
+    meter.write_text("40")
+    rig.run(at(2 * 24 * 60))
+    meter.write_text("15")  # a dip of 25 points two days later is not a reset
+    rig.run(at(2 * 24 * 60 + 15))
+    assert rig.wakes() == []
+    meter.write_text("90")
+    rig.run(at(7 * 24 * 60))
+    meter.write_text("2")
+    rig.run(at(7 * 24 * 60 + 15))
+    assert len(rig.wakes()) == 1
 
 
 def test_usage_far_behind_pace_rearms_daily(tmp_path):
@@ -333,12 +516,12 @@ def test_usage_far_behind_pace_rearms_daily(tmp_path):
     rig, meter = usage_rig(tmp_path, 10, weekly_reset="Mon 00:00", pace_per_day=15, behind_by=20)
     rig.config(usage=json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]["usage"], timezone="UTC")
     rig.run(T0)
-    w = rig.wakes()
-    assert len(w) == 1 and "far behind pace: 10 % of the week used, pace says 38 %" in w[0]["text"]
+    assert rig.wakes() == []  # first run: recorded without waking
     rig.run(at(60))
     assert rig.wakes() == []
     rig.run(at(24 * 60 + 5))
-    assert len(rig.wakes()) == 1
+    w = rig.wakes()
+    assert len(w) == 1 and "far behind pace: 10 % of the week used, pace says 53 %" in w[0]["text"]
     meter.write_text("60")
     rig.run(at(2 * 24 * 60 + 10))
     assert rig.wakes() == []
@@ -386,12 +569,54 @@ def test_dry_run_changes_nothing(tmp_path):
     assert rig.wakes() == [] and not rig.state_dir.exists()
 
 
-def test_failed_delivery_stays_in_outbox(tmp_path):
+def test_failed_delivery_backs_off_and_drops_only_after_24h(tmp_path):
     rig = Rig(tmp_path)
-    rig.base["wake"] = {"command": rig.script("fail.py", "import sys; sys.exit(3)\n")}
+    calls = tmp_path / "calls"
+    rig.base["wake"] = {"command": rig.script("fail.py", f"import sys\nopen({str(calls)!r}, 'a').write('x')\n"
+                                                         "sys.exit(3)\n")}
     rig.config(disk={"paths": [str(tmp_path)], "min_free_gb": 10**9})
     p = rig.run(T0)
-    assert "FAILED to wake orch-1" in p.stdout and len(rig.state()["outbox"]) == 1
+    assert "FAILED to wake orch-1" in p.stdout and "watcher: FAILED" in p.stderr  # urgent: loud
+    for m in range(30, 23 * 60, 30):
+        rig.run(at(m))
+    attempts = len(calls.read_text())
+    assert 15 <= attempts <= 30  # backoff 15, 30, 60, 60 ... min, never dropped after a few attempts
+    assert len(rig.state()["outbox"]) == 1
+    p = rig.run(at(24 * 60 + 15))
+    assert "DROPPED URGENT wake for orch-1" in p.stderr and rig.state()["outbox"] == []
+
+
+def test_one_broken_webhook_does_not_stop_other_threads(tmp_path):
+    rig = Rig(tmp_path)
+    proj = tmp_path / "proj"
+    jobs = proj / ".work/orchestrator/jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "a.json").write_text(json.dumps({"thread": "child-a", "jobs": ["1"]}))
+    (jobs / "b.json").write_text(json.dumps({"thread": "child-b", "jobs": ["2"]}))
+    rig.base["wake"]["webhooks"] = {"child-a": "not a url"}
+    listing = rig.script("b.py", "print('1 RUN')\nprint('2 RUN')\n")
+    rig.config(projects=[str(proj)], jobs={"command": listing})
+    rig.run(T0)
+    rig.config(projects=[str(proj)], jobs={"command": rig.script("c.py", "print('1 DONE')\nprint('2 DONE')\n")})
+    p = rig.run(at(15))
+    assert [w["thread"] for w in rig.wakes()] == ["child-b"]
+    assert "FAILED to wake child-a" in p.stdout
+    assert [i["thread"] for i in rig.state()["outbox"]] == ["child-a"]
+
+
+def test_default_t3_send_puts_double_dash_before_the_thread(tmp_path):
+    rig = Rig(tmp_path)
+    argv_file = tmp_path / "argv.json"
+    fake_t3 = tmp_path / "t3"
+    fake_t3.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                       f"json.dump([sys.argv[1:], sys.stdin.read()], open({str(argv_file)!r}, 'w'))\n")
+    fake_t3.chmod(0o755)
+    rig.base["wake"] = {"t3_bin": str(fake_t3)}
+    rig.config(t3_home=str(tmp_path / "t3home"), disk={"paths": [str(tmp_path)], "min_free_gb": 10**9})
+    rig.run(T0)
+    args, text = json.loads(argv_file.read_text())
+    assert args == ["thread", "send", "--base-dir", str(tmp_path / "t3home"), "--", "orch-1", "-"]
+    assert text.startswith("watcher: disk: ")
 
 
 def test_hosts_on_online_runs_copy_once_without_wake(tmp_path):

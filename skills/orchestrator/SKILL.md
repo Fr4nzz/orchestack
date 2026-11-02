@@ -55,8 +55,8 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
    file `.work/orchestrator/jobs/<name>.json` in the project (`{"thread": "<your thread id>", "jobs": ["<id>"],
    "next_step": "..."}`) and a state file (outputs, next step), and end the turn with `handoff:`. The watcher
    wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the
-   projected finish instead. At the wake, a fresh worker (or the child) reads the state file and reports `done:`
-   or `failed:`. A background wait that times out after 2 h returns to an expired cache and costs more.
+   projected finish instead. At the wake, a fresh worker (or the child) reads the state file, moves the job file
+   to `jobs/done/` and reports `done:` or `failed:`. A background wait that times out after 2 h returns to an expired cache and costs more.
 9. **Short waits (under about 1 h): wait inside one tool call, without ending the turn,** because a child's turn
    end wakes its parent whatever it says. Claude: one background command or Monitor that exits when every job has
    ended or one has failed, then `t3_background_wait`. Codex: one foreground command that blocks until the jobs end
@@ -69,7 +69,8 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     delete it when the work settles. Completion notices already wake the parent.
 11. **Launched instead of delegated (opt-in, off by default).** A `t3_thread_launch` child does not wake its parent
     at each turn end and reports only by sending a message. Use it only with the user's standing permission
-    (recorded in `local.md`), and pair it with a backstop that reports a dead child.
+    (recorded in `local.md`). Its backstop is the watcher if the child carries a lineage parent (it then wakes the
+    parent when the child fails, waits or is stuck), otherwise one one-off scheduled wake.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: see `bulk-image-review`), results to files and
     one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest, with a manifest of
     expected job ids and the fallback in the brief. For repeated well-specified waves, pilot a mid-tier model against
