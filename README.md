@@ -95,6 +95,7 @@ chat once, with a short message that starts with the reason, e.g. `watcher: jobs
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
 | `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`. With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
 | `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
+| `decision` | the child's parent | a child's last message is a `decision:` that T3 never relayed to the parent (the turn was started by an outside send, such as a jobs wake), idle for 30 min (`"children": false` turns it off) |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
 
 A job file is what a child writes before it ends its turn on a long wait:

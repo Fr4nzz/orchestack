@@ -10,7 +10,8 @@ owns it. The same state never wakes anyone twice.
   disk      free disk below the floor -> the orchestrator (urgent)
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
             (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
-  decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator
+  decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
+            last message is a decision: that never reached its parent (no relay there) for 30 min -> its parent
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -46,6 +47,7 @@ from urllib.parse import quote
 UTC = timezone.utc
 ACTIVE = ("queued", "preparing", "starting", "running", "waiting")
 DECISION_RE = re.compile(r"^\s*[*_>]*\s*decision:", re.I | re.M)
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9:_%.][A-Za-z0-9:_%.-]*$")
@@ -94,6 +96,17 @@ Q_ANSWERED_AFTER = (
     "SELECT 1 FROM orchestration_v2_projection_messages"
     " WHERE thread_id = ? AND created_at > ? AND role = 'assistant' AND streaming = 0 LIMIT 1"
 )
+Q_LATEST_MESSAGE = (
+    "SELECT message_id, role, streaming, created_at, substr(json_extract(payload_json, '$.text'), 1, 4000)"
+    " FROM orchestration_v2_projection_messages WHERE thread_id = ? ORDER BY created_at DESC, message_id DESC LIMIT 1"
+)
+# T3's completion relay in the parent: a user message "Delegated task node:<encoded child id> (<title>) [<status>]".
+Q_RELAYED = (
+    "SELECT 1 FROM orchestration_v2_projection_messages"
+    " WHERE thread_id = ? AND created_at >= ? AND role = 'user'"
+    " AND json_extract(payload_json, '$.text') LIKE 'Delegated task %'"
+    " AND instr(lower(json_extract(payload_json, '$.text')), ?) > 0 LIMIT 1"
+)
 
 # Each check's queries with sample parameters. Before a check runs, EXPLAIN QUERY PLAN must show no scan of a big
 # table (a plain scan, or a scan of an index that is not partial), or the check is skipped: after a T3 schema change
@@ -101,7 +114,9 @@ Q_ANSWERED_AFTER = (
 PLANNED = {
     "children": [(Q_PROJECTS, ()), (Q_RECENT_THREADS, ("", "")), (Q_THREAD, ("",)), (Q_LATEST_RUN, ("",)),
                  (Q_ACTIVE_RUNS, ()), (Q_PENDING_REQUESTS, ()), (Q_BUSY, ("",))],
-    "decision": [(Q_BUSY, ("",)), (Q_LATEST_USER_MESSAGES, ("",)), (Q_ANSWERED_AFTER, ("", ""))],
+    "decision": [(Q_BUSY, ("",)), (Q_LATEST_USER_MESSAGES, ("",)), (Q_ANSWERED_AFTER, ("", "")),
+                 (Q_PROJECTS, ()), (Q_RECENT_THREADS, ("", "")), (Q_THREAD, ("",)), (Q_LATEST_MESSAGE, ("",)),
+                 (Q_RELAYED, ("", "", ""))],
 }
 SCAN_OK = {"projection_projects", "orchestration_v2_projection_runtime_requests"}  # tiny tables
 SCAN_RE = re.compile(r"^SCAN (?:TABLE )?(\w+)(?: USING (?:COVERING )?INDEX (\S+))?")
@@ -196,13 +211,14 @@ class Ctx:
         a check counts as initialised only after one successful run. The first run records without waking."""
         return self.work, self.first
 
-    def wake(self, thread, check, text, urgent=False, prompt=None, line=None):
+    def wake(self, thread, check, text, urgent=False, prompt=None, line=None, recheck=None):
         if not thread or not THREAD_ID_RE.match(str(thread)):
             self.note(f"{check}: no valid thread to wake for: {text}")
             return
         self.state.setdefault("outbox", []).append({
             "thread": thread, "line": line or f"watcher: {check}: {text}", "urgent": bool(urgent),
             "prompt": prompt, "created": iso(self.now), "attempts": 0,
+            **({"recheck": recheck} if recheck else {}),
         })
 
     @property
@@ -243,6 +259,7 @@ class Ctx:
     def close(self):
         if self._db is not None:
             self._db.close()
+            self._db = None
 
     def thread(self, thread_id):
         """(title, parent id) of a live thread, or None. Primary-key lookup."""
@@ -578,7 +595,74 @@ def check_decision(ctx):
             line = DECISION_RE.search(text)
             snippet = short(text[line.start():].strip(), 90)
             ctx.wake(th, "decision", f"unanswered for {int(age.total_seconds() // 60)} min: {snippet}")
+    if sec.get("children", True):
+        check_child_decisions(ctx, sec, st, after)
     ctx.note("decision: checked" + (" (baseline, recorded without waking)" if baseline else ""))
+
+
+def relay_tokens(thread_id):
+    """What a T3 completion relay in the parent quotes of a child: its last UUID (the delegate task id). The relay
+    URL-encodes the id once or several times, so a child without a UUID is matched in its plain and encoded forms."""
+    found = UUID_RE.findall(str(thread_id))
+    if found:
+        return [found[-1].lower()]
+    once = quote(str(thread_id), safe="")
+    return list(dict.fromkeys(t.lower() for t in (str(thread_id), once, quote(once, safe=""))))
+
+
+def child_decision_relayed(db, parent, child, created):
+    return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child))
+
+
+def child_decision_open(db, item):
+    """A held child-decision wake is still due: the decision is still the child's last message and no relay came."""
+    r = item["recheck"]
+    row = db.execute(Q_LATEST_MESSAGE, (r["child"],)).fetchone()
+    return bool(row) and row[0] == r["message"] and not child_decision_relayed(db, r["parent"], r["child"],
+                                                                                r["created"])
+
+
+def check_child_decisions(ctx, sec, st, after):
+    """A child ended its turn with a decision: that its parent never got. T3 relays a delegate's completion to the
+    parent only for turns the delegate task started; a turn started by an outside thread send (a watcher jobs wake,
+    say) ends silently. Wakes the parent once per message, after the child sat idle for `minutes`. Only a message that
+    starts with decision: counts (a decision buried in a longer report reaches the parent with the relay anyway)."""
+    db = ctx.db()
+    # The first run of this part records without waking, also where the decision check ran before it existed.
+    baseline = ctx.first or (ctx.baseline and "child_seen" not in st)
+    seen = st.setdefault("child_seen", {})
+    prune(seen, ctx.now)
+    since = iso(ctx.now - timedelta(hours=float(sec.get("child_lookback_hours", 48))))
+    for (pid,) in db.execute(Q_PROJECTS).fetchall():
+        for (tid,) in db.execute(Q_RECENT_THREADS, (pid, since)).fetchall():
+            row = db.execute(Q_LATEST_MESSAGE, (tid,)).fetchone()
+            if not row:
+                continue
+            mid, role, streaming, created, text = row
+            text = text or ""
+            if mid in seen or role != "assistant" or streaming or created < since or not DECISION_RE.match(text):
+                continue
+            if baseline:  # every open decision, of any age, counts as handled
+                seen[mid] = iso(ctx.now)
+                continue
+            age = ctx.now - parse_iso(created)
+            if age < after or db.execute(Q_BUSY, (tid,)).fetchone():
+                continue
+            info = ctx.thread(tid)
+            if not info or not info[1] or not ctx.thread(info[1]):
+                continue  # not a child, or its parent is gone: nobody to wake
+            title, parent = info
+            if db.execute(Q_BUSY, (parent,)).fetchone():
+                continue  # not marked seen: T3 may write the relay when the parent's turn ends
+            seen[mid] = iso(ctx.now)
+            if child_decision_relayed(db, parent, tid, created):
+                continue
+            snippet = short(text.strip(), 90)
+            ctx.note(f"decision: child {short(title, 40)} ({tid}) decision not relayed -> wake {parent}")
+            ctx.wake(parent, "decision", f'child "{short(title, 60)}" ({tid}) ended with a decision '
+                                         f"{int(age.total_seconds() // 60)} min ago that T3 did not relay to you: "
+                                         f"{snippet}",
+                     recheck={"child": tid, "message": mid, "parent": parent, "created": created})
 
 
 def check_hosts(ctx):
@@ -671,6 +755,15 @@ def deliver(ctx):
     by_thread = {}
     expired = iso(ctx.now - timedelta(hours=OUTBOX_MAX_HOURS))
     for item in outbox:
+        if item.get("recheck") and item["created"] < iso(ctx.now):  # held from an earlier run: still due?
+            try:
+                due = child_decision_open(ctx.db(), item)
+            except Exception as e:  # cannot tell: keep it
+                due = True
+                lines_out.append(f"recheck failed for {item['thread']}: {short(e, 80)}")
+            if not due:
+                lines_out.append(f"dropped for {item['thread']}, answered or relayed meanwhile: {item['line']}")
+                continue
         if item["created"] < expired:
             kind = "URGENT wake" if item["urgent"] else "wake"
             msg = f"watcher: DROPPED {kind} for {item['thread']}, undelivered for {OUTBOX_MAX_HOURS} h: {item['line']}"
@@ -809,7 +902,9 @@ def main(argv=None):
             initialised.append(name)
         health.pop(name, None)
     ctx.close()
+    ctx.deadline = time.monotonic() + budget  # delivery rechecks held child-decision wakes in the database
     out = deliver(ctx)
+    ctx.close()
     state["last_run"] = iso(now)
     if args.dry_run or args.verbose:
         for n in ctx.notes:

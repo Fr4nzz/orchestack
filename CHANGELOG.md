@@ -8,6 +8,9 @@
   Wakes through `t3 thread send` or a scheduled-task webhook, one per change, rate-limited, quiet hours, dry run.
 - Watcher `usage.accounts`: further plan accounts read from the same meter output, each with a unique name, its own pattern, weekly
   reset, pace and state. Their wakes start with `[name]`, and a broken entry is skipped without blocking the first account.
+- Watcher `decision` check: a child whose last message is a `decision:` that never reached its parent (T3 relays
+  only turns the delegate task started, not turns started by an outside send such as a jobs wake) wakes the parent
+  once after 30 min idle. Its first run records without waking.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.

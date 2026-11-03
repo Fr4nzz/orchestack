@@ -452,6 +452,144 @@ def test_decision_answered_or_busy_is_quiet(tmp_path):
     assert rig.wakes() == []  # m1 answered, m2 queued behind a running turn
 
 
+
+def fake_uuid(n):
+    return f"{n:08x}-0000-4000-8000-{n:012x}"
+
+
+TASK_UUID = fake_uuid(0xbb)  # T3 names a delegate's thread after the parent's command and the delegate task
+CHILD = f"thread:delegated-task:command%3Amcp%3A{fake_uuid(0xaa)}%3Adelegate-task%3A{TASK_UUID}"
+
+
+def child_rig(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "orch-1", "Orchestrator: shop")
+    add_thread(conn, CHILD, "Retrain stage", parent="orch-1", updated=at(10))
+    rig.config(t3_db=str(db), decision={"minutes": 30})
+    rig.run(T0)  # baseline
+    # The child's turn was started by an outside send (a watcher jobs wake), so T3 relays nothing to the parent.
+    add_message(conn, "u1", CHILD, "user", "watcher: jobs: train.json: all 2 jobs ended", at(5))
+    add_message(conn, "a1", CHILD, "assistant", "s05 finished.", at(7))
+    add_message(conn, "a2", CHILD, "assistant", "decision: the vocabulary diff is ready. GO?", at(10))
+    add_run(conn, CHILD, 1, "completed", at(5), at(10))
+    return rig, conn
+
+
+def test_child_decision_not_relayed_wakes_parent_once(tmp_path):
+    rig, conn = child_rig(tmp_path)
+    add_message(conn, "p1", "orch-1", "user", "unrelated question from the user", at(20))
+    add_message(conn, "p2", "orch-1", "user", f"is {TASK_UUID} done yet?", at(21))  # quotes the id, not a relay
+    rig.run(at(30))
+    assert rig.wakes() == []  # only 20 min old
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert w[0]["text"].startswith('watcher: decision: child "Retrain stage" (' + CHILD + ") ended with a decision"
+                                   " 35 min ago that T3 did not relay to you: decision: the vocabulary diff is ready.")
+    rig.run(at(200))
+    assert rig.wakes() == []
+
+
+def relay_text(task_uuid):  # the continuation form: the child id encoded twice, then the run ordinal
+    return ("Delegated task node:delegated-task:provider-continuation%3Amessage%3Athread%3Athread%253Adelegated-task"
+            f"%253Adelegate-task%25253A{task_uuid.upper()}%3Aordinal%3A1%3A{fake_uuid(0xcc)} (Retrain stage)"
+            " [completed]")
+
+
+def test_child_decision_relayed_answered_or_busy_is_quiet(tmp_path):
+    rig, conn = child_rig(tmp_path)
+    add_message(conn, "p1", "orch-1", "user", relay_text(TASK_UUID), at(11))
+    rig.run(at(60))
+    assert rig.wakes() == []  # the parent got the relay
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_rig(tmp_path / "b")
+    add_message(conn2, "a3", CHILD, "user", "GO", at(20))
+    rig2.run(at(60))
+    assert rig2.wakes() == []  # the parent answered: the decision is no longer the child's last message
+    add_message(conn2, "a4", CHILD, "assistant", "decision: second question?", at(61))
+    add_run(conn2, CHILD, 2, "running", at(62))
+    rig2.run(at(120))
+    assert rig2.wakes() == []  # the child is busy again
+
+
+def test_child_decision_waits_for_a_busy_parent(tmp_path):
+    rig, conn = child_rig(tmp_path)
+    add_run(conn, "orch-1", 1, "running", at(8))
+    rig.run(at(45))
+    assert rig.wakes() == []  # T3 may relay when the parent's turn ends
+    conn.execute("UPDATE orchestration_v2_projection_runs SET status = 'completed' WHERE thread_id = 'orch-1'")
+    conn.commit()
+    add_message(conn, "p1", "orch-1", "user", relay_text(TASK_UUID), at(50))
+    rig.run(at(60))
+    assert rig.wakes() == []  # the relay came after the parent's turn
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_rig(tmp_path / "b")
+    add_run(conn2, "orch-1", 1, "running", at(8))
+    rig2.run(at(45))
+    conn2.execute("UPDATE orchestration_v2_projection_runs SET status = 'completed' WHERE thread_id = 'orch-1'")
+    conn2.commit()
+    rig2.run(at(60))
+    assert len(rig2.wakes()) == 1  # still no relay once the parent is idle
+
+
+def test_child_decision_held_wake_is_dropped_once_answered(tmp_path):
+    rig, conn = child_rig(tmp_path)
+    state = rig.state()
+    state["sent"] = {"orch-1": at(40)}  # the parent was woken recently: the next wake is held
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    rig.run(at(45))
+    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 1
+    add_message(conn, "a3", CHILD, "user", "GO", at(50))
+    p = rig.run(at(105), "--verbose")
+    assert rig.wakes() == [] and rig.state()["outbox"] == []
+    assert "answered or relayed meanwhile" in p.stdout
+
+
+def test_child_decision_ignores_other_cases(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "orch-1", "Orchestrator: shop", updated=at(10))
+    add_thread(conn, "gone", "Archived lead")
+    conn.execute("UPDATE orchestration_v2_projection_threads SET archived_at = ? WHERE thread_id = 'gone'", (T0,))
+    add_thread(conn, "c-orphan", "Orphan", parent="gone", updated=at(10))
+    add_thread(conn, "c-stream", "Streaming", parent="orch-1", updated=at(10))
+    add_thread(conn, "c-plain", "No uuid child", parent="orch-1", updated=at(10))
+    rig.config(t3_db=str(db), decision={"threads": ["x"]})
+    rig.run(T0)
+    add_message(conn, "o1", "orch-1", "assistant", "decision: top-level threads have no parent to wake", at(10))
+    add_message(conn, "g1", "c-orphan", "assistant", "decision: parent archived", at(10))
+    add_message(conn, "s1", "c-stream", "assistant", "decision: still writing", at(10))
+    conn.execute("UPDATE orchestration_v2_projection_messages SET streaming = 1 WHERE message_id = 's1'")
+    add_message(conn, "n1", "c-plain", "assistant", "decision: relayed?", at(10))
+    add_message(conn, "r1", "orch-1", "user", "Delegated task node:c-plain (No uuid child) [completed]", at(11))
+    conn.commit()
+    rig.run(at(60))
+    assert rig.wakes() == []
+    rig.config(t3_db=str(db), decision={"threads": ["x"], "children": False})
+    add_message(conn, "n2", "c-plain", "assistant", "decision: off?", at(61))
+    rig.run(at(120))
+    assert rig.wakes() == []
+
+
+def test_child_decision_part_starts_with_a_baseline(tmp_path):
+    rig, conn = child_rig(tmp_path)
+    add_thread(conn, "c2", "Young", parent="orch-1", updated=at(40))
+    state = rig.state()
+    del state["decision"]["child_seen"]  # state written before the child part existed
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    add_message(conn, "y1", "c2", "assistant", "decision: young one?", at(40))
+    rig.run(at(45))
+    assert rig.wakes() == []
+    assert set(rig.state()["decision"]["child_seen"]) == {"a2", "y1"}  # recorded whatever their age
+    rig.run(at(90))
+    assert rig.wakes() == []
+    add_message(conn, "a3", CHILD, "assistant", "decision: another one?", at(90))
+    rig.run(at(130))
+    assert len(rig.wakes()) == 1
+
 # ---------- disk ----------
 
 def test_disk_low_wakes_immediately_once_and_rearms(tmp_path):
