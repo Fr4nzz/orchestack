@@ -13,6 +13,7 @@ owns it. The same state never wakes anyone twice.
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
             thread send from the child there) for 30 min -> its parent
+  expiry    a login (e.g. tsh) has less than warn_minutes left or is gone -> the orchestrator (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -34,6 +35,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -49,6 +51,9 @@ UTC = timezone.utc
 ACTIVE = ("queued", "preparing", "starting", "running", "waiting")
 DECISION_RE = re.compile(r"^\s*[*_>]*\s*decision:", re.I | re.M)
 RESULT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff):", re.I)  # a child's report to its parent
+# A report the child sent its parent itself may name its subject first: "handoff (s05): ...", "**done** - s05:".
+SENT_REPORT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff)[*_]*\s*(\([^)\n]{1,60}\)|[-\u2013]\s*[^:\n]{1,40})?"
+                            r"[*_]*\s*:", re.I)
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
@@ -111,9 +116,9 @@ Q_RELAYED = (
 )
 # Messages one thread sent another with t3_thread_send (the payload names the sender thread).
 Q_SENT_BY = (
-    "SELECT substr(json_extract(payload_json, '$.text'), 1, 200) FROM orchestration_v2_projection_messages"
+    "SELECT created_at, substr(json_extract(payload_json, '$.text'), 1, 200) FROM orchestration_v2_projection_messages"
     " WHERE thread_id = ? AND created_at >= ? AND role = 'user'"
-    " AND json_extract(payload_json, '$.senderThreadId') = ? LIMIT 50"
+    " AND json_extract(payload_json, '$.senderThreadId') = ? ORDER BY created_at DESC LIMIT 50"
 )
 Q_RECENT_RUNS = (
     "SELECT requested_at, json_extract(payload_json, '$.startedAt') FROM orchestration_v2_projection_runs"
@@ -208,7 +213,7 @@ class Ctx:
         self.baseline = baseline
         self.notes = []
         self._db = None
-        self.work, self.first, self.deadline = {}, False, None
+        self.work, self.first, self.deadline, self.budget = {}, False, None, 2.0
         self.tz = tzinfo(cfg.get("timezone"))
 
     def section(self, name):
@@ -256,6 +261,11 @@ class Ctx:
             self._db.set_progress_handler(
                 lambda: 1 if self.deadline is not None and time.monotonic() > self.deadline else 0, 1000)
         return self._db
+
+    def restart_budget(self):
+        """A check that waited on a slow command gets a fresh database budget for the queries after it."""
+        if self.deadline is not None:
+            self.deadline = time.monotonic() + self.budget
 
     def require_plans(self, check):
         """Raise if any of the check's queries would scan a big table (see PLANNED)."""
@@ -344,30 +354,24 @@ def check_jobs(ctx):
         raw = str(raw or "").upper()
         return "FAILED" if raw in failed_states else "DONE" if raw in done else raw
 
-    listed = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and re.match(r"^\d+(\[\d+\])?$", parts[0]):
-            listed.setdefault(parts[0].split("[")[0], []).append(norm(parts[1]))
+    listed = parse_listing(out, norm)
     if not listed and not no_jobs:
         ctx.note("jobs: the cluster listed no jobs at all (empty or partial output?). Nothing decided.")
         return
     grace = timedelta(minutes=float(sec.get("missing_grace_minutes", 30)))
-    unknown_after = timedelta(hours=float(sec.get("unknown_after_hours", 12)))
     terminal = ("DONE", "FAILED", "GONE")
+
+    def absent(j, mtime):  # not listed now, not known to have ended, and seen before or past the grace period
+        last = norm(seen_jobs.get(j, {}).get("state")) or None
+        return j not in listed and last not in terminal and (
+            last or ctx.now - datetime.fromtimestamp(mtime, UTC) > grace)
+
+    missing = list(dict.fromkeys(j for g in groups for j in g[3] if absent(j, g[5])))
+    if missing and sec.get("lookup_command"):  # jobs that dropped out of the listing: ask how they ended
+        for j, got in lookup_jobs(ctx, sec, missing, norm).items():
+            listed.setdefault(j, got)
+    ctx.restart_budget()  # report_hint reads the database after the (slow) cluster calls
     for f, key, thread, jobs, next_step, mtime, parent in groups:
-        if not any(j in listed for j in jobs) and not all(norm(seen_jobs.get(j, {}).get("state")) in terminal[:2]
-                                                         for j in jobs):
-            rep = reported.setdefault(key, {})
-            if ctx.now - datetime.fromtimestamp(mtime, UTC) > unknown_after and not rep.get("unknown"):
-                rep["unknown"] = rep["ended"] = iso(ctx.now)
-                if not baseline:
-                    ctx.wake(thread, "jobs", f"unknown: {f.name}: jobs {', '.join(jobs[:5])} no longer listed, "
-                                             f"check bhist/outputs.{report_hint(ctx, thread, parent)}")
-                ctx.note(f"jobs: {f.name}: none of its jobs listed for over {unknown_after}: unknown")
-            else:
-                ctx.note(f"jobs: {f.name}: none of its jobs listed. Nothing decided.")
-            continue
         states = {}
         for j in jobs:
             got = listed.get(j)
@@ -375,10 +379,11 @@ def check_jobs(ctx):
             if got:
                 s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else got[0]
                 seen_jobs[j] = {"state": s, "at": iso(ctx.now)}
-            elif last in ("DONE", "FAILED"):
+            elif last in terminal:
                 s = last  # ended earlier, since dropped from the listing
             elif last or ctx.now - datetime.fromtimestamp(mtime, UTC) > grace:
-                s = "GONE"  # others are listed but this one no longer (or never) is: the scheduler forgot it
+                s = "GONE"  # the cluster answered but no longer (or never) lists it, and no lookup knew it: ended
+                seen_jobs[j] = {"state": s, "at": iso(ctx.now)}  # decided once: not looked up again
             else:
                 s = "UNLISTED"
             states[j] = s
@@ -398,12 +403,52 @@ def check_jobs(ctx):
                      urgent=True)
             rep["failed"] = iso(ctx.now)
         if ended:
-            gone = " GONE means no longer listed: check the job's output." if "GONE" in states.values() else ""
+            gone = (" GONE means no longer listed and its exit status unknown: check the job's output."
+                    if "GONE" in states.values() else "")
             ctx.wake(thread, "jobs", f"{f.name}: all {len(jobs)} jobs ended ({counts}).{gone}{nxt}"
                      f"{report_hint(ctx, thread, parent)}",
                      urgent=bool(bad) and not rep.get("failed"))
             rep["ended"] = iso(ctx.now)
         ctx.note(f"jobs: {f.name} -> {counts}")
+
+
+JOB_ID_RE = re.compile(r"^\d+(\[\d+\])?$")
+SAFE_JOB_RE = re.compile(r"^[A-Za-z0-9_.:\[\]-]{1,64}$")
+
+
+def parse_listing(out, norm):
+    """'<jobid> <state>' lines -> {base job id: [normalised state per line]} (array elements share their base id)."""
+    listed = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and JOB_ID_RE.match(parts[0]):
+            listed.setdefault(parts[0].split("[")[0], []).append(norm(parts[1]))
+    return listed
+
+
+def lookup_jobs(ctx, sec, ids, norm):
+    """Ask the scheduler about jobs that dropped out of the listing (jobs.lookup_command, "{jobs}" = the ids, e.g.
+    watcher/lsf_job_states.sh: bjobs -a, then bacct, then bhist). Same '<jobid> <state>' output. A failed or silent
+    lookup returns what it could read: the rest count as GONE (ended, exit status unknown)."""
+    ids = [j for j in ids if SAFE_JOB_RE.match(j)]
+    if not ids:
+        return {}
+    cmd = sec["lookup_command"]
+    if isinstance(cmd, list):
+        argv = []
+        for a in cmd:
+            argv += ids if a == "{jobs}" else [str(a).replace("{jobs}", " ".join(shlex.quote(j) for j in ids))]
+        cmd = argv
+    else:
+        cmd = str(cmd).replace("{jobs}", " ".join(shlex.quote(j) for j in ids))
+    rc, out, err = run_cmd(cmd, float(sec.get("lookup_timeout_s", 180)))
+    found = {j: got for j, got in parse_listing(out, norm).items() if j in ids}
+    if rc != 0:
+        ctx.note(f"jobs: lookup failed ({rc}): {short(err, 120)}; read {len(found)} of {len(ids)}")
+    else:
+        ctx.note(f"jobs: lookup of {len(ids)} unlisted jobs: " + (", ".join(
+            f"{j} {'/'.join(v)}" for j, v in found.items()) or "none known"))
+    return found
 
 
 def report_hint(ctx, thread, parent=""):
@@ -656,13 +701,15 @@ def turn_start(db, child, created):
 
 
 def child_decision_relayed(db, parent, child, created, since=None):
-    """The parent has the child's message: a T3 relay after it, or a report (decision:/done:/failed:/handoff:) the
-    child sent the parent itself with t3_thread_send during that turn (since `since`, the turn's start). A turn the
-    parent started with its own send does not count: whether the parent read the answer is unknown, and a spare
-    wake costs less than a lost report."""
-    since = since or created
-    if any(RESULT_RE.match(t or "") for (t,) in db.execute(Q_SENT_BY, (parent, since, str(child))).fetchall()):
-        return True
+    """The parent has the child's message: a T3 relay after it, or a message the child sent the parent itself with
+    t3_thread_send (T3 records the sender in the payload's senderThreadId): any such send at or after the child's
+    message, or a report (decision/done/failed/handoff, optionally with a subject before the colon) sent earlier in
+    that turn (since `since`, the turn's start). A turn the parent started with its own send does not count: whether
+    the parent read the answer is unknown, and a spare wake costs less than a lost report."""
+    since = min(since or created, created)
+    for at, text in db.execute(Q_SENT_BY, (parent, since, str(child))).fetchall():
+        if (at or "") >= created or SENT_REPORT_RE.match(text or ""):
+            return True
     return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child))
 
 
@@ -727,6 +774,72 @@ def check_child_decisions(ctx, sec, st, after):
                      recheck={"child": tid, "message": mid, "parent": parent, "created": created, "since": turn})
 
 
+DURATION_RE = re.compile(r"^\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s)?\s*$", re.I)
+
+
+def parse_validity(text, now, tz):
+    """The end of a validity read by expiry.pattern: a time ('2026-11-03 20:10:49 -0500', ISO, or naive in
+    `timezone`) or a duration left ('7h59m0s', '45m', '2d3h'). -> aware datetime."""
+    text = " ".join(str(text).split())
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M %z"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=tz)
+    except ValueError:
+        pass
+    m = DURATION_RE.match(text)
+    if m and any(m.groups()):
+        d, h, mi, se = (int(x or 0) for x in m.groups())
+        return now + timedelta(days=d, hours=h, minutes=mi, seconds=se)
+    raise ValueError(f"cannot read a time or duration from {short(text, 60)!r}")
+
+
+def check_expiry(ctx):
+    """A login runs out soon (e.g. `tsh status`, "Valid until"). Off unless configured: `command` prints the
+    validity, `pattern` (a regex) captures its end time or the duration left in group 1. Wakes the orchestrator (or
+    `thread`) once per expiry time when less than `warn_minutes` (60) are left, or when the pattern no longer
+    matches (logged out). A renewal brings a new expiry time, and with it a new wake later. Times within
+    5 min of the one already reported count as the same login (a duration read each run drifts by seconds)."""
+    sec = ctx.section("expiry")
+    st, _ = ctx.check_state("expiry")
+    cmd, pattern = sec.get("command"), sec.get("pattern")
+    if not cmd or not pattern:
+        raise ValueError("expiry needs command and pattern")
+    name = sec.get("name") or "login"
+    rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 30)))
+    if rc is None:
+        raise RuntimeError(f"expiry command failed: {short(err, 120)}")
+    m = re.search(pattern, out + "\n" + err, re.I | re.M)
+    warn = timedelta(minutes=float(sec.get("warn_minutes", 60)))
+    hint = f" {short(sec['hint'], 160)}" if sec.get("hint") else ""
+    if not m:
+        key, text = "unreadable", f"{name}: no validity found (rc {rc}), logged out?{hint}"
+        left = None
+    else:
+        until = parse_validity(m.group(1), ctx.now, ctx.tz)
+        left = until - ctx.now
+        key = iso(until)
+        when = until.astimezone(ctx.tz).strftime("%Y-%m-%d %H:%M")
+        mins = int(left.total_seconds() // 60)
+        text = (f"{name} expired at {when}.{hint}" if mins <= 0
+                else f"{name} valid for {mins} min more (until {when}).{hint}")
+    ctx.note(f"expiry: {name} " + (f"{int(left.total_seconds() // 60)} min left" if left is not None
+                                   else "no validity found"))
+    if left is not None and left >= warn:
+        st.pop("warned", None)
+        return
+    warned = st.get("warned")
+    if warned == key or (left is not None and warned not in (None, "unreadable")
+                         and abs(parse_iso(warned) - until) <= timedelta(minutes=5)):
+        return
+    st["warned"] = key
+    ctx.wake(sec.get("thread") or ctx.orchestrator, "expiry", text, urgent=True)
+
+
 def check_hosts(ctx):
     """A host became reachable: run its copy command. Never wakes a chat."""
     st, _ = ctx.check_state("hosts")
@@ -747,7 +860,7 @@ def check_hosts(ctx):
 
 
 CHECKS = (("jobs", check_jobs), ("children", check_children), ("disk", check_disk), ("usage", check_usage),
-          ("decision", check_decision), ("hosts", check_hosts))
+          ("decision", check_decision), ("expiry", check_expiry), ("hosts", check_hosts))
 
 
 # ---------- delivery ----------
@@ -934,7 +1047,7 @@ def main(argv=None):
         state["initialised"] = [n for n, _ in CHECKS if n in state]
     initialised = state["initialised"]
     health = state.setdefault("health", {})
-    budget = float(cfg.get("db_budget_ms", 2000)) / 1000
+    budget = ctx.budget = float(cfg.get("db_budget_ms", 2000)) / 1000
     alert_after = timedelta(minutes=float(cfg.get("fail_alert_minutes", 120)))
     for name, fn in CHECKS:
         sec = cfg.get(name)

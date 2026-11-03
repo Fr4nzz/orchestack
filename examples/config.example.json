@@ -32,7 +32,8 @@
       ],
       "failed_states": [
         "EXIT"
-      ]
+      ],
+      "lookup_command": "ssh cluster-login 'bash -l -s -- {jobs}' < ~/src/orchestack/watcher/lsf_job_states.sh"
     },
     "children": {
       "stuck_hours": 3,
@@ -52,6 +53,17 @@
     },
     "decision": {
       "minutes": 30
+    },
+    "expiry": {
+      "enabled": false,
+      "name": "tsh",
+      "command": [
+        "tsh",
+        "status"
+      ],
+      "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})",
+      "warn_minutes": 60,
+      "hint": "Run tsh login."
     },
     "hosts": []
   }

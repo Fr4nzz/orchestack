@@ -15,6 +15,13 @@
   that turn counts as delivered.
 - Watcher `jobs` wakes tell a child owner to send its result to its parent with `t3_thread_send` (mode "queue"),
   naming the parent from the job file's optional `"parent"` key or the thread's lineage.
+- Watcher `jobs`: a job the cluster no longer lists counts as ended at once (was: nothing decided for 12 h, then an
+  `unknown:` wake), so jobs that finish during an outage still wake their owner once. Optional `lookup_command`
+  (with `watcher/lsf_job_states.sh` for LSF: `bjobs -a`, `bacct`, `bhist`) reads how they ended.
+- Watcher `decision`: a child's own `t3_thread_send` to its parent counts as delivered when it comes after the
+  child's message, or earlier in the turn as a report with a subject (`handoff (s05): ...`).
+- Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
+  `warn_minutes` left wakes the orchestrator once.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.

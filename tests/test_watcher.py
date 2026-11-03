@@ -214,19 +214,87 @@ def test_jobs_failure_is_urgent_and_forgotten_jobs_count_as_ended(tmp_path):
     assert len(w) == 1 and "all 2 jobs ended (DONE 1, FAILED 1)" in w[0]["text"]
 
 
-def test_jobs_gone_only_while_other_jobs_are_listed(tmp_path):
+def test_jobs_gone_when_the_cluster_answers_without_them(tmp_path):
     rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
     rig.run(T0)
     listing.write_text("")  # rc 0 but no output: decide nothing
     p = rig.run(at(15), "--verbose")
     assert rig.wakes() == [] and "listed no jobs at all" in p.stdout
-    listing.write_text("555 RUN\n")  # other jobs listed, but none of this file's: decide nothing
-    p = rig.run(at(30), "--verbose")
-    assert rig.wakes() == [] and "none of its jobs listed" in p.stdout
+    listing.write_text("555 ZOMBI\n102 DONE\n")  # 101 dropped out, 102 ended: both ended
+    rig.run(at(30))
+    w = rig.wakes()
+    assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"] and "check the job's output" in w[0]["text"]
+
+
+def test_jobs_gone_job_is_looked_up_once(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    calls = tmp_path / "calls"
+    cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+    cfg["jobs"]["lookup_command"] = rig.script("l.py", f"import sys; open({str(calls)!r}, 'a').write('x')\n") + ["{jobs}"]
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    rig.run(T0)
+    listing.write_text("102 RUN\n")
+    rig.run(at(15))
+    rig.run(at(30))
+    assert calls.read_text() == "x" and rig.wakes() == []
     listing.write_text("102 DONE\n")
     rig.run(at(45))
     w = rig.wakes()
-    assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"] and "check the job's output" in w[0]["text"]
+    assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"]
+
+
+def test_jobs_none_listed_after_an_outage_wake_once_with_the_lookup_state(tmp_path):
+    """Jobs seen running, then the cluster was unreachable while they ended and dropped out of bjobs -a."""
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 PEND\n")
+    calls = tmp_path / "lookup_calls"
+    lookup = rig.script("lookup.py", "import sys\n"
+                        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                        "print('101 DONE')\nprint('102 EXIT')\nprint('999 DONE')\n")
+    cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+    cfg["jobs"]["lookup_command"] = lookup + ["{jobs}"]
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    rig.run(T0)
+    assert not calls.exists()
+    down = cfg["jobs"]["command"]
+    cfg["jobs"]["command"] = rig.script("down.py", "import sys; sys.exit(255)\n")
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    rig.run(at(15))
+    rig.run(at(30))
+    assert rig.wakes() == []
+    cfg["jobs"]["command"] = down
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    listing.write_text("555 ZOMBI\n")  # back: other jobs listed, none of this file's
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "child-7"
+    assert "all 2 jobs ended (DONE 1, FAILED 1)" in w[0]["text"]
+    assert calls.read_text() == "101 102\n"
+    rig.run(at(120))
+    assert rig.wakes() == [] and calls.read_text() == "101 102\n"  # decided once, never looked up again
+
+
+def test_jobs_lookup_failure_still_counts_unlisted_jobs_as_ended(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+    cfg["jobs"]["lookup_command"] = " ".join(rig.script("l.py", "import sys; print('101 DONE'); sys.exit(3)\n")) \
+        + " {jobs}"
+    rig.config(projects=cfg["projects"], jobs=cfg["jobs"])
+    rig.run(T0)
+    listing.write_text("No unfinished job found\n")
+    p = rig.run(at(15), "--verbose")
+    w = rig.wakes()
+    assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"] and "lookup failed (3)" in p.stdout
+
+
+def test_jobs_never_listed_wait_for_the_grace_period(tmp_path):
+    rig, listing = job_rig(tmp_path, "555 RUN\n")
+    os.utime(tmp_path / "proj/.work/orchestrator/jobs/train.json", (parse_ts(at(-10)),) * 2)
+    write_state(rig, {"initialised": ["jobs"], "jobs": {}})
+    rig.run(T0)
+    assert rig.wakes() == []  # written 10 min ago, not yet submitted
+    rig.run(at(25))
+    w = rig.wakes()
+    assert len(w) == 1 and "(GONE 2)" in w[0]["text"]
 
 
 def test_jobs_custom_states_share_one_terminal_form(tmp_path):
@@ -670,6 +738,24 @@ def test_child_result_sent_by_the_child_is_quiet(tmp_path):
     conn2.commit()
     rig2.run(at(45))
     assert len(rig2.wakes()) == 1  # a send from before this turn does not count
+
+
+def test_child_report_sent_with_a_subject_or_after_the_message_is_quiet(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "handoff: the dev guards say GO")
+    child_sends(conn, "s1", "handoff (s05): the dev guards say GO", at(9))  # before its final message
+    rig.run(at(45))
+    assert rig.wakes() == []
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_result_rig(tmp_path / "b", "done: s05 trained")
+    child_sends(conn2, "s1", "Results for s05 are in results/s05.json", at(11))  # any send after its message
+    rig2.run(at(45))
+    assert rig2.wakes() == []
+    (tmp_path / "c").mkdir()
+    rig3, conn3 = child_result_rig(tmp_path / "c", "done: s05 trained")
+    child_sends(conn3, "s1", "progress: still on it", at(9))  # earlier in the turn and not a report
+    child_sends(conn3, "s2", "Done with step 1 of 3: moving on", at(9))
+    rig3.run(at(45))
+    assert len(rig3.wakes()) == 1
 
 
 def child_sends(conn, mid, text, created):
@@ -1124,7 +1210,7 @@ def test_old_open_job_file_is_still_tracked(tmp_path):
     assert len(w) == 1 and "all 2 jobs ended (DONE 2)" in w[0]["text"]
 
 
-def test_no_job_found_counts_as_empty_and_purged_jobs_get_one_unknown_wake(tmp_path):
+def test_no_job_found_counts_as_empty_and_purged_jobs_end_once(tmp_path):
     rig = Rig(tmp_path)
     proj = tmp_path / "proj"
     jobs = proj / ".work/orchestrator/jobs"
@@ -1136,11 +1222,10 @@ def test_no_job_found_counts_as_empty_and_purged_jobs_get_one_unknown_wake(tmp_p
     rig.config(projects=[str(proj)], jobs={"command": lsf})
     write_state(rig, {"initialised": ["jobs"], "jobs": {}})
     p = rig.run(T0, "--verbose")
-    assert rig.wakes() == [] and "Nothing decided" in p.stdout and "error" not in p.stdout  # 11 h old
-    rig.run(at(65))
+    assert "error" not in p.stdout
     w = rig.wakes()
     assert len(w) == 1 and w[0]["thread"] == "child-5"
-    assert w[0]["text"].startswith("watcher: jobs: unknown: lost.json: jobs 7, 8 no longer listed, check bhist")
+    assert w[0]["text"].startswith("watcher: jobs: lost.json: all 2 jobs ended (GONE 2). GONE means no longer listed")
     rig.run(at(80))
     rig.run(at(200))
     assert rig.wakes() == []
@@ -1172,3 +1257,63 @@ def test_new_urgent_item_skips_the_thread_backoff(tmp_path):
     rig.run(at(1))
     w = rig.wakes()
     assert len(w) == 1 and "watcher: disk:" in w[0]["text"] and "older" in w[0]["text"]
+
+
+# ---------- expiry ----------
+
+def expiry_rig(tmp_path, left_text):
+    rig = Rig(tmp_path)
+    out = tmp_path / "status.txt"
+    out.write_text(left_text)
+    cmd = rig.script("status.py", f"print(open({str(out)!r}).read(), end='')\n")
+    rig.config(expiry={"command": cmd, "name": "tsh", "hint": "Run tsh login.",
+                       "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
+    return rig, out
+
+
+def test_expiry_wakes_once_per_login_and_again_after_renewal(tmp_path):
+    rig, out = expiry_rig(tmp_path, "  Valid until: 2026-01-07 14:00:00 +0000 UTC [valid for 2h0m0s]\n")
+    rig.run(T0)
+    assert rig.wakes() == []
+    rig.run(at(75))  # 45 min left: urgent, so not held by quiet hours or the rate limit
+    w = rig.wakes()
+    assert w == [{"thread": "orch-1", "text": "watcher: expiry: tsh valid for 45 min more (until 2026-01-07 14:00)."
+                                              " Run tsh login."}]
+    rig.run(at(90))
+    rig.run(at(130))
+    assert rig.wakes() == []
+    out.write_text("  Valid until: 2026-01-07 09:00:00 -0500 -05 [valid for 1h0m0s]\n")  # renewed: 14:00 UTC again
+    rig.run(at(140))
+    assert rig.wakes() == []  # same expiry time as already reported
+    out.write_text("  Valid until: 2026-01-07 22:30:00 +0000\n")
+    rig.run(at(150))
+    out.write_text("  Valid until: 2026-01-07 22:30:00 +0000 [EXPIRED]\n")
+    rig.run(at(631))
+    w = rig.wakes()
+    assert len(w) == 1 and "tsh expired at 2026-01-07 22:30." in w[0]["text"]
+
+
+def test_expiry_logged_out_or_duration_pattern(tmp_path):
+    rig, out = expiry_rig(tmp_path, "Not logged in.\n")
+    rig.run(T0)
+    w = rig.wakes()
+    assert len(w) == 1 and "tsh: no validity found" in w[0]["text"]
+    rig.run(at(15))
+    assert rig.wakes() == []
+    (tmp_path / "d").mkdir()
+    rig2 = Rig(tmp_path / "d")
+    rig2.config(expiry={"command": rig2.script("s.py", "print('valid for 0h20m5s')\n"),
+                        "pattern": r"valid for (\S+)"})
+    rig2.run(T0)
+    w = rig2.wakes()
+    assert len(w) == 1 and "login valid for 20 min more" in w[0]["text"]
+    rig2.config(expiry={"command": rig2.script("s.py", "print('valid for 0h5m3s')\n"), "pattern": r"valid for (\S+)"})
+    rig2.run(at(15))
+    assert rig2.wakes() == []  # the same login, read again as a duration a few seconds off
+
+
+def test_expiry_is_off_by_default(tmp_path):
+    rig = Rig(tmp_path)
+    rig.config()
+    p = rig.run(T0, "--verbose")
+    assert "expiry" not in p.stdout and rig.wakes() == []

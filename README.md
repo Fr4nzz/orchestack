@@ -95,7 +95,8 @@ chat once, with a short message that starts with the reason, e.g. `watcher: jobs
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
 | `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`. With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
 | `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
-| `decision` | the child's parent | a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, and T3 never relayed it to the parent (the turn was started by an outside send, such as a jobs wake) nor did the child send the parent such a report during that turn, idle for 30 min (`"children": false` turns it off) |
+| `decision` | the child's parent | a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, and T3 never relayed it to the parent (the turn was started by an outside send, such as a jobs wake) nor did the child send the parent a message with `t3_thread_send` after it, or a report (`handoff (subject): ...` counts) earlier in that turn, idle for 30 min (`"children": false` turns it off) |
+| `expiry` | the orchestrator (or `thread`), urgent | off unless configured: `command` prints a login's validity and `pattern` captures its end time or the time left in group 1. Wakes once per expiry time when less than `warn_minutes` (60) are left, or when the pattern no longer matches (logged out). E.g. `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}` |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
 
 A job file is what a child writes before it ends its turn on a long wait:
@@ -104,9 +105,13 @@ A job file is what a child writes before it ends its turn on a long wait:
 when a turn started by an outside send ends, so the wake tells a child owner to send its result to its parent with
 `t3_thread_send` (mode "queue"), naming the parent from `parent` or else from the thread's lineage. `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
 `["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job
-file is open, and a failed command decides nothing. "No job found" counts as an empty listing. Once a file is over
-12 h old and none of its jobs are listed any more, its owner gets one `unknown:` wake (check `bhist` or the
-outputs). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
+file is open, and a failed command decides nothing. "No job found" counts as an empty listing. Once the cluster
+answers, a job it no longer lists has ended (one never listed gets `missing_grace_minutes`, 30, from the file's
+time). Finished jobs drop out of `bjobs -a` within hours, so after an outage `jobs.lookup_command` (optional,
+`{jobs}` = the ids, `lookup_timeout_s` 180) asks how those jobs ended, in the same `<jobid> <state>` form. For LSF,
+`watcher/lsf_job_states.sh` tries `bjobs -a`, then `bacct -l`, then `bhist -l` over the last 10 event files:
+`"ssh cluster-login 'bash -l -s -- {jobs}' < ~/src/orchestack/watcher/lsf_job_states.sh"`. A job the lookup
+cannot place counts as `GONE` (ended, exit status unknown). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
 plain append).
 
 The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill): pick
