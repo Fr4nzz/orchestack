@@ -33,7 +33,7 @@
       "failed_states": [
         "EXIT"
       ],
-      "lookup_command": "ssh cluster-login 'bash -l -s -- {jobs}' < ~/src/orchestack/watcher/lsf_job_states.sh"
+      "lookup_command": "ssh cluster-login \"bash -l -s -- {jobs}\" < ~/src/orchestack/watcher/lsf_job_states.sh"
     },
     "children": {
       "stuck_hours": 3,

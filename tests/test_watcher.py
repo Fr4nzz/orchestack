@@ -226,6 +226,18 @@ def test_jobs_gone_when_the_cluster_answers_without_them(tmp_path):
     assert len(w) == 1 and "(DONE 1, GONE 1)" in w[0]["text"] and "check the job's output" in w[0]["text"]
 
 
+def test_jobs_array_with_a_running_element_has_not_ended(tmp_path):
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    rig.run(T0)
+    listing.write_text("101[1] DONE\n101[2] RUN\n102 DONE\n")
+    rig.run(at(15))
+    assert rig.wakes() == []
+    listing.write_text("101[1] DONE\n101[2] DONE\n102 DONE\n")
+    rig.run(at(30))
+    w = rig.wakes()
+    assert len(w) == 1 and "(DONE 2)" in w[0]["text"]
+
+
 def test_jobs_gone_job_is_looked_up_once(tmp_path):
     rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
     calls = tmp_path / "calls"

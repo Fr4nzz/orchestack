@@ -110,7 +110,8 @@ answers, a job it no longer lists has ended (one never listed gets `missing_grac
 time). Finished jobs drop out of `bjobs -a` within hours, so after an outage `jobs.lookup_command` (optional,
 `{jobs}` = the ids, `lookup_timeout_s` 180) asks how those jobs ended, in the same `<jobid> <state>` form. For LSF,
 `watcher/lsf_job_states.sh` tries `bjobs -a`, then `bacct -l`, then `bhist -l` over the last 10 event files:
-`"ssh cluster-login 'bash -l -s -- {jobs}' < ~/src/orchestack/watcher/lsf_job_states.sh"`. A job the lookup
+`"ssh cluster-login \"bash -l -s -- {jobs}\" < ~/src/orchestack/watcher/lsf_job_states.sh"` (double quotes keep the
+quoted array ids such as `'123[4]'` from globbing on either side). A job the lookup
 cannot place counts as `GONE` (ended, exit status unknown). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
 plain append).
 

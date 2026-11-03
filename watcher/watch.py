@@ -377,7 +377,8 @@ def check_jobs(ctx):
             got = listed.get(j)
             last = norm(seen_jobs.get(j, {}).get("state")) or None
             if got:
-                s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else got[0]
+                s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else next(
+                    x for x in got if x != "DONE")  # an array with elements still running has not ended
                 seen_jobs[j] = {"state": s, "at": iso(ctx.now)}
             elif last in terminal:
                 s = last  # ended earlier, since dropped from the listing
@@ -825,7 +826,7 @@ def check_expiry(ctx):
         key = iso(until)
         when = until.astimezone(ctx.tz).strftime("%Y-%m-%d %H:%M")
         mins = int(left.total_seconds() // 60)
-        text = (f"{name} expired at {when}.{hint}" if mins <= 0
+        text = (f"{name} expired at {when}.{hint}" if left <= timedelta(0)
                 else f"{name} valid for {mins} min more (until {when}).{hint}")
     ctx.note(f"expiry: {name} " + (f"{int(left.total_seconds() // 60)} min left" if left is not None
                                    else "no validity found"))

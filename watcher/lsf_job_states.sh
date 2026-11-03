@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # orchestack watcher: how LSF jobs that dropped out of the bjobs listing ended. Runs ON the cluster: feed it to a
 # login shell there with the job ids as arguments, e.g. as the watcher's jobs.lookup_command:
-#   "ssh cluster-login 'bash -l -s -- {jobs}' < /path/to/orchestack/watcher/lsf_job_states.sh"
+#   "ssh cluster-login \"bash -l -s -- {jobs}\" < /path/to/orchestack/watcher/lsf_job_states.sh"
 # Prints "<jobid> <state>" per job it finds (DONE or EXIT, or the bjobs state), nothing for a job it cannot find.
 # Order: bjobs -a (recent jobs), then bacct -l (the current accounting file), then bhist -l over the last
 # ORCHESTACK_BHIST_FILES (10) event files, because busy clusters rotate their logs within hours. Read-only.
