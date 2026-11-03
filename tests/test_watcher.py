@@ -157,6 +157,45 @@ def test_jobs_wake_owner_once_when_all_ended(tmp_path):
     assert rig.wakes() == []  # same state never wakes twice
 
 
+def test_jobs_wake_tells_a_child_to_send_its_result_to_the_parent(tmp_path):
+    # Without a database the wake still says it, without an id.
+    rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
+    rig.run(T0)
+    listing.write_text("101 DONE\n102 DONE\n")
+    rig.run(at(30))
+    text = rig.wakes()[0]["text"]
+    assert 'If you are a child, send your done:/failed:/handoff:/decision: to your parent with t3_thread_send' in text
+    assert '(mode "queue")' in text
+    # The lineage parent from the database, or a top-level owner (no sentence).
+    for owner, parent, expect in (("child-7", "lead-1", "to your parent lead-1 with t3_thread_send"),
+                                  ("top-1", None, None)):
+        sub = tmp_path / owner
+        sub.mkdir()
+        rig, listing = job_rig(sub, "101 RUN\n102 RUN\n")
+        conn = make_db(sub / "state.sqlite")
+        add_thread(conn, "lead-1", "Lead")
+        add_thread(conn, owner, "Owner", parent=parent)
+        jobs = sub / "proj" / ".work" / "orchestrator" / "jobs"
+        (jobs / "train.json").write_text(json.dumps({"thread": owner, "jobs": ["101", "102"]}))
+        cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+        rig.config(**{**cfg, "t3_db": str(sub / "state.sqlite")})
+        rig.run(T0)
+        listing.write_text("101 DONE\n102 DONE\n")
+        rig.run(at(30))
+        text = rig.wakes()[0]["text"]
+        assert (expect in text) if expect else ("t3_thread_send" not in text)
+    # The job file's "parent" key wins.
+    sub = tmp_path / "keyed"
+    sub.mkdir()
+    rig, listing = job_rig(sub, "101 RUN\n")
+    jobs = sub / "proj" / ".work" / "orchestrator" / "jobs"
+    (jobs / "train.json").write_text(json.dumps({"thread": "child-7", "parent": "lead-9", "jobs": ["101"]}))
+    rig.run(T0)
+    listing.write_text("101 EXIT\n")
+    rig.run(at(30))
+    assert "to your parent lead-9 with t3_thread_send" in rig.wakes()[0]["text"]
+
+
 def test_jobs_failure_is_urgent_and_forgotten_jobs_count_as_ended(tmp_path):
     rig, listing = job_rig(tmp_path, "101 RUN\n102 RUN\n")
     rig.run(T0)
@@ -589,6 +628,109 @@ def test_child_decision_part_starts_with_a_baseline(tmp_path):
     add_message(conn, "a3", CHILD, "assistant", "decision: another one?", at(90))
     rig.run(at(130))
     assert len(rig.wakes()) == 1
+
+def child_result_rig(tmp_path, text="done: s05 trained, metrics in results/s05.json"):
+    rig, conn = child_rig(tmp_path)
+    conn.execute("DELETE FROM orchestration_v2_projection_messages WHERE message_id = 'a2'")
+    conn.commit()
+    add_message(conn, "a2", CHILD, "assistant", text, at(10))
+    return rig, conn
+
+
+def test_child_result_not_relayed_wakes_parent_once(tmp_path):
+    for word in ("done", "failed", "handoff"):
+        sub = tmp_path / word
+        sub.mkdir()
+        rig, conn = child_result_rig(sub, f"**{word}:** the s05 report")
+        rig.run(at(45))
+        w = rig.wakes()
+        assert len(w) == 1 and w[0]["thread"] == "orch-1"
+        assert w[0]["text"].startswith(f'watcher: decision: child "Retrain stage" ({CHILD}) ended with a {word}:'
+                                       " report 35 min ago that T3 did not relay to you:")
+        rig.run(at(200))
+        assert rig.wakes() == []
+    (tmp_path / "x").mkdir()
+    rig, conn = child_result_rig(tmp_path / "x", "s05 still training")
+    rig.run(at(45))
+    assert rig.wakes() == []  # progress, not a report
+
+
+def test_child_result_sent_by_the_child_is_quiet(tmp_path):
+    rig, conn = child_result_rig(tmp_path)
+    # The child sent its result itself during the turn (before its final message), as the jobs wake asks.
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?, ?, ?, 0, ?, ?, ?)",
+                 ("s1", "orch-1", "user", at(9), at(9), json.dumps({"text": "done: s05", "senderThreadId": CHILD})))
+    conn.commit()
+    rig.run(at(45))
+    assert rig.wakes() == []
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_result_rig(tmp_path / "b")
+    conn2.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?, ?, ?, 0, ?, ?, ?)",
+                  ("s1", "orch-1", "user", at(4), at(4), json.dumps({"text": "old", "senderThreadId": CHILD})))
+    conn2.commit()
+    rig2.run(at(45))
+    assert len(rig2.wakes()) == 1  # a send from before this turn does not count
+
+
+def child_sends(conn, mid, text, created):
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?, ?, ?, 0, ?, ?, ?)",
+                 (mid, "orch-1", "user", created, created, json.dumps({"text": text, "senderThreadId": CHILD})))
+    conn.commit()
+
+
+def test_child_result_progress_send_does_not_count_and_held_wake_drops(tmp_path):
+    rig, conn = child_result_rig(tmp_path)
+    child_sends(conn, "s1", "progress: s05 at epoch 30", at(8))  # not a report
+    state = rig.state()
+    state["sent"] = {"orch-1": at(40)}  # the parent was woken recently: the next wake is held
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    rig.run(at(45))
+    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 1
+    child_sends(conn, "s2", "done: s05 trained", at(50))  # sent late, but within the turn's window
+    p = rig.run(at(105), "--verbose")
+    assert rig.wakes() == [] and rig.state()["outbox"] == []
+    assert "answered or relayed meanwhile" in p.stdout
+
+
+def test_child_result_turn_ignores_a_later_empty_run_and_old_held_wakes(tmp_path):
+    rig, conn = child_result_rig(tmp_path)
+    child_sends(conn, "s1", "done: s05 trained", at(9))
+    add_run(conn, CHILD, 2, "failed", at(20), at(21))  # a later run that wrote nothing
+    rig.run(at(45))
+    assert rig.wakes() == []
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_result_rig(tmp_path / "b")
+    state = rig2.state()  # a wake held before the upgrade: its recheck has no "since"
+    state["outbox"] = [{"thread": "orch-1", "line": "watcher: decision: old", "urgent": False, "prompt": None,
+                        "created": at(40), "attempts": 0,
+                        "recheck": {"child": CHILD, "message": "a2", "parent": "orch-1", "created": at(10)}}]
+    state["sent"] = {"orch-1": at(40)}
+    state["decision"]["child_seen"]["a2"] = at(40)
+    (rig2.state_dir / "watch.json").write_text(json.dumps(state))
+    child_sends(conn2, "s1", "done: s05 trained", at(9))  # sent during the turn, before the final message
+    p = rig2.run(at(105), "--verbose")
+    assert rig2.wakes() == [] and "answered or relayed meanwhile" in p.stdout
+
+
+def test_child_result_kinds_start_with_a_baseline(tmp_path):
+    rig, conn = child_result_rig(tmp_path)
+    state = rig.state()
+    del state["decision"]["child_results"]  # state written when only decision: counted
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    rig.run(at(45))
+    assert rig.wakes() == []
+    assert "a2" in rig.state()["decision"]["child_seen"]
+    add_message(conn, "a3", CHILD, "assistant", "decision: and now?", at(50))
+    rig.run(at(100))
+    assert len(rig.wakes()) == 1
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = child_rig(tmp_path / "b")  # a decision: already open on the upgrade run still wakes
+    state = rig2.state()
+    del state["decision"]["child_results"]
+    (rig2.state_dir / "watch.json").write_text(json.dumps(state))
+    rig2.run(at(45))
+    assert len(rig2.wakes()) == 1
+
 
 # ---------- disk ----------
 

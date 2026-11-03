@@ -10,7 +10,11 @@
   reset, pace and state. Their wakes start with `[name]`, and a broken entry is skipped without blocking the first account.
 - Watcher `decision` check: a child whose last message is a `decision:` that never reached its parent (T3 relays
   only turns the delegate task started, not turns started by an outside send such as a jobs wake) wakes the parent
-  once after 30 min idle. Its first run records without waking.
+  once after 30 min idle. Its first run records without waking. It also covers `done:`, `failed:` and `handoff:`
+  (first run after the upgrade records those without waking), and a report the child sent the parent itself during
+  that turn counts as delivered.
+- Watcher `jobs` wakes tell a child owner to send its result to its parent with `t3_thread_send` (mode "queue"),
+  naming the parent from the job file's optional `"parent"` key or the thread's lineage.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.

@@ -11,7 +11,8 @@ owns it. The same state never wakes anyone twice.
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
             (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
-            last message is a decision: that never reached its parent (no relay there) for 30 min -> its parent
+            last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
+            thread send from the child there) for 30 min -> its parent
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -47,6 +48,7 @@ from urllib.parse import quote
 UTC = timezone.utc
 ACTIVE = ("queued", "preparing", "starting", "running", "waiting")
 DECISION_RE = re.compile(r"^\s*[*_>]*\s*decision:", re.I | re.M)
+RESULT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff):", re.I)  # a child's report to its parent
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
@@ -107,6 +109,16 @@ Q_RELAYED = (
     " AND json_extract(payload_json, '$.text') LIKE 'Delegated task %'"
     " AND instr(lower(json_extract(payload_json, '$.text')), ?) > 0 LIMIT 1"
 )
+# Messages one thread sent another with t3_thread_send (the payload names the sender thread).
+Q_SENT_BY = (
+    "SELECT substr(json_extract(payload_json, '$.text'), 1, 200) FROM orchestration_v2_projection_messages"
+    " WHERE thread_id = ? AND created_at >= ? AND role = 'user'"
+    " AND json_extract(payload_json, '$.senderThreadId') = ? LIMIT 50"
+)
+Q_RECENT_RUNS = (
+    "SELECT requested_at, json_extract(payload_json, '$.startedAt') FROM orchestration_v2_projection_runs"
+    " WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 10"
+)
 
 # Each check's queries with sample parameters. Before a check runs, EXPLAIN QUERY PLAN must show no scan of a big
 # table (a plain scan, or a scan of an index that is not partial), or the check is skipped: after a T3 schema change
@@ -116,7 +128,7 @@ PLANNED = {
                  (Q_ACTIVE_RUNS, ()), (Q_PENDING_REQUESTS, ()), (Q_BUSY, ("",))],
     "decision": [(Q_BUSY, ("",)), (Q_LATEST_USER_MESSAGES, ("",)), (Q_ANSWERED_AFTER, ("", "")),
                  (Q_PROJECTS, ()), (Q_RECENT_THREADS, ("", "")), (Q_THREAD, ("",)), (Q_LATEST_MESSAGE, ("",)),
-                 (Q_RELAYED, ("", "", ""))],
+                 (Q_RELAYED, ("", "", "")), (Q_SENT_BY, ("", "", "")), (Q_RECENT_RUNS, ("",))],
 }
 SCAN_OK = {"projection_projects", "orchestration_v2_projection_runtime_requests"}  # tiny tables
 SCAN_RE = re.compile(r"^SCAN (?:TABLE )?(\w+)(?: USING (?:COVERING )?INDEX (\S+))?")
@@ -308,7 +320,8 @@ def check_jobs(ctx):
             continue
         if reported.get(key, {}).get("ended"):
             continue
-        groups.append((f, key, thread, jobs, str(data.get("next_step") or ""), f.stat().st_mtime))
+        groups.append((f, key, thread, jobs, str(data.get("next_step") or ""), f.stat().st_mtime,
+                       str(data.get("parent") or "")))
     live = {f"{f}:{f.stat().st_mtime_ns}" for f in files}
     for key in [k for k in reported if k not in live]:
         del reported[key]
@@ -342,7 +355,7 @@ def check_jobs(ctx):
     grace = timedelta(minutes=float(sec.get("missing_grace_minutes", 30)))
     unknown_after = timedelta(hours=float(sec.get("unknown_after_hours", 12)))
     terminal = ("DONE", "FAILED", "GONE")
-    for f, key, thread, jobs, next_step, mtime in groups:
+    for f, key, thread, jobs, next_step, mtime, parent in groups:
         if not any(j in listed for j in jobs) and not all(norm(seen_jobs.get(j, {}).get("state")) in terminal[:2]
                                                          for j in jobs):
             rep = reported.setdefault(key, {})
@@ -350,7 +363,7 @@ def check_jobs(ctx):
                 rep["unknown"] = rep["ended"] = iso(ctx.now)
                 if not baseline:
                     ctx.wake(thread, "jobs", f"unknown: {f.name}: jobs {', '.join(jobs[:5])} no longer listed, "
-                                             f"check bhist/outputs.")
+                                             f"check bhist/outputs.{report_hint(ctx, thread, parent)}")
                 ctx.note(f"jobs: {f.name}: none of its jobs listed for over {unknown_after}: unknown")
             else:
                 ctx.note(f"jobs: {f.name}: none of its jobs listed. Nothing decided.")
@@ -380,15 +393,38 @@ def check_jobs(ctx):
             continue
         if bad and not rep.get("failed") and not ended:
             running = sum(1 for s in states.values() if s not in terminal)
-            ctx.wake(thread, "jobs", f"{f.name}: job {', '.join(bad[:5])} failed ({running} still running).{nxt}",
+            ctx.wake(thread, "jobs", f"{f.name}: job {', '.join(bad[:5])} failed ({running} still running).{nxt}"
+                     f"{report_hint(ctx, thread, parent)}",
                      urgent=True)
             rep["failed"] = iso(ctx.now)
         if ended:
             gone = " GONE means no longer listed: check the job's output." if "GONE" in states.values() else ""
-            ctx.wake(thread, "jobs", f"{f.name}: all {len(jobs)} jobs ended ({counts}).{gone}{nxt}",
+            ctx.wake(thread, "jobs", f"{f.name}: all {len(jobs)} jobs ended ({counts}).{gone}{nxt}"
+                     f"{report_hint(ctx, thread, parent)}",
                      urgent=bool(bad) and not rep.get("failed"))
             rep["ended"] = iso(ctx.now)
         ctx.note(f"jobs: {f.name} -> {counts}")
+
+
+def report_hint(ctx, thread, parent=""):
+    """The sentence a jobs wake adds for a child: T3 tells a parent only when a turn the delegate task started ends,
+    so a turn this wake starts ends silently and the child must send its result itself. The parent comes from the
+    job file's "parent" key, else from the thread's lineage. A top-level thread gets nothing."""
+    how = ' with t3_thread_send (mode "queue"): T3 does not tell your parent when a turn started by this wake ends.'
+    if parent and THREAD_ID_RE.match(parent):
+        return f" Send your done:/failed:/handoff:/decision: to your parent {parent}{how}"
+    if thread == ctx.orchestrator:
+        return ""
+    try:
+        info = ctx.thread(thread)
+    except Exception:  # no database or an unreadable one: say it without the id
+        info = None
+    else:
+        if info is None or not info[1]:
+            return ""  # a top-level thread (or one T3 no longer has): no parent to report to
+        if THREAD_ID_RE.match(str(info[1])):
+            return f" Send your done:/failed:/handoff:/decision: to your parent {info[1]}{how}"
+    return f" If you are a child, send your done:/failed:/handoff:/decision: to your parent{how}"
 
 
 def _count(values):
@@ -610,7 +646,23 @@ def relay_tokens(thread_id):
     return list(dict.fromkeys(t.lower() for t in (str(thread_id), once, quote(once, safe=""))))
 
 
-def child_decision_relayed(db, parent, child, created):
+def turn_start(db, child, created):
+    """When the child's turn that wrote a message at `created` started: the latest run started by then."""
+    for requested, started in db.execute(Q_RECENT_RUNS, (child,)).fetchall():
+        start = started or requested
+        if start and start <= created:
+            return start
+    return created
+
+
+def child_decision_relayed(db, parent, child, created, since=None):
+    """The parent has the child's message: a T3 relay after it, or a report (decision:/done:/failed:/handoff:) the
+    child sent the parent itself with t3_thread_send during that turn (since `since`, the turn's start). A turn the
+    parent started with its own send does not count: whether the parent read the answer is unknown, and a spare
+    wake costs less than a lost report."""
+    since = since or created
+    if any(RESULT_RE.match(t or "") for (t,) in db.execute(Q_SENT_BY, (parent, since, str(child))).fetchall()):
+        return True
     return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child))
 
 
@@ -619,17 +671,23 @@ def child_decision_open(db, item):
     r = item["recheck"]
     row = db.execute(Q_LATEST_MESSAGE, (r["child"],)).fetchone()
     return bool(row) and row[0] == r["message"] and not child_decision_relayed(db, r["parent"], r["child"],
-                                                                                r["created"])
+                                                                                r["created"],
+                                                                                r.get("since") or turn_start(
+                                                                                    db, r["child"], r["created"]))
 
 
 def check_child_decisions(ctx, sec, st, after):
-    """A child ended its turn with a decision: that its parent never got. T3 relays a delegate's completion to the
-    parent only for turns the delegate task started; a turn started by an outside thread send (a watcher jobs wake,
-    say) ends silently. Wakes the parent once per message, after the child sat idle for `minutes`. Only a message that
-    starts with decision: counts (a decision buried in a longer report reaches the parent with the relay anyway)."""
+    """A child ended its turn with a decision:, done:, failed: or handoff: that its parent never got. T3 relays a
+    delegate's completion to the parent only for turns the delegate task started; a turn started by an outside thread
+    send (a watcher jobs wake, say) ends silently. Wakes the parent once per message, after the child sat idle for
+    `minutes`, unless the child sent the parent a message itself during that turn. Only a last message that starts
+    with one of these words counts (anything else is progress, not a report)."""
     db = ctx.db()
-    # The first run of this part records without waking, also where the decision check ran before it existed.
+    # The first run of this part records without waking, also where the decision check ran before it existed, and
+    # the first run that knows done:/failed:/handoff: records those (state from before they counted).
     baseline = ctx.first or (ctx.baseline and "child_seen" not in st)
+    results_baseline = baseline or (ctx.baseline and not st.get("child_results"))
+    st["child_results"] = True
     seen = st.setdefault("child_seen", {})
     prune(seen, ctx.now)
     since = iso(ctx.now - timedelta(hours=float(sec.get("child_lookback_hours", 48))))
@@ -640,9 +698,11 @@ def check_child_decisions(ctx, sec, st, after):
                 continue
             mid, role, streaming, created, text = row
             text = text or ""
-            if mid in seen or role != "assistant" or streaming or created < since or not DECISION_RE.match(text):
+            m = RESULT_RE.match(text)
+            if mid in seen or role != "assistant" or streaming or created < since or not m:
                 continue
-            if baseline:  # every open decision, of any age, counts as handled
+            kind = m.group(1).lower()
+            if baseline or (results_baseline and kind != "decision"):  # every open one, of any age, is handled
                 seen[mid] = iso(ctx.now)
                 continue
             age = ctx.now - parse_iso(created)
@@ -655,14 +715,16 @@ def check_child_decisions(ctx, sec, st, after):
             if db.execute(Q_BUSY, (parent,)).fetchone():
                 continue  # not marked seen: T3 may write the relay when the parent's turn ends
             seen[mid] = iso(ctx.now)
-            if child_decision_relayed(db, parent, tid, created):
+            turn = turn_start(db, tid, created)
+            if child_decision_relayed(db, parent, tid, created, turn):
                 continue
             snippet = short(text.strip(), 90)
-            ctx.note(f"decision: child {short(title, 40)} ({tid}) decision not relayed -> wake {parent}")
-            ctx.wake(parent, "decision", f'child "{short(title, 60)}" ({tid}) ended with a decision '
+            what = "a decision" if kind == "decision" else f"a {kind}: report"
+            ctx.note(f"decision: child {short(title, 40)} ({tid}) {kind} not relayed -> wake {parent}")
+            ctx.wake(parent, "decision", f'child "{short(title, 60)}" ({tid}) ended with {what} '
                                          f"{int(age.total_seconds() // 60)} min ago that T3 did not relay to you: "
                                          f"{snippet}",
-                     recheck={"child": tid, "message": mid, "parent": parent, "created": created})
+                     recheck={"child": tid, "message": mid, "parent": parent, "created": created, "since": turn})
 
 
 def check_hosts(ctx):
