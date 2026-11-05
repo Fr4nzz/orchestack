@@ -47,12 +47,15 @@ class Rig:
         cfg.update(sections)
         (self.cfg_dir / "config.json").write_text(json.dumps({"watcher": cfg}))
 
-    def run(self, now=T0, *flags):
+    def run(self, now=T0, *flags, extra_env=None, check=True):
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.tmp), "TZ": "UTC",
                "ORCHESTACK_CONFIG_DIR": str(self.cfg_dir), "ORCHESTACK_STATE_DIR": str(self.state_dir)}
-        p = subprocess.run([sys.executable, "-I", str(WATCH), "--now", now, *flags], capture_output=True,
+        env.update(extra_env or {})
+        args = list(flags) if now is None else ["--now", now, *flags]
+        p = subprocess.run([sys.executable, "-I", str(WATCH), *args], capture_output=True,
                            text=True, env=env, timeout=30)
-        assert p.returncode == 0, p.stderr
+        if check:
+            assert p.returncode == 0, p.stderr
         return p
 
     def wakes(self):
@@ -1278,7 +1281,7 @@ def expiry_rig(tmp_path, left_text):
     out = tmp_path / "status.txt"
     out.write_text(left_text)
     cmd = rig.script("status.py", f"print(open({str(out)!r}).read(), end='')\n")
-    rig.config(expiry={"command": cmd, "name": "tsh", "hint": "Run tsh login.",
+    rig.config(expiry={"command": cmd, "name": "tsh", "hint": "Run tsh login.", "only_with_jobs": False,
                        "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
     return rig, out
 
@@ -1315,11 +1318,12 @@ def test_expiry_logged_out_or_duration_pattern(tmp_path):
     (tmp_path / "d").mkdir()
     rig2 = Rig(tmp_path / "d")
     rig2.config(expiry={"command": rig2.script("s.py", "print('valid for 0h20m5s')\n"),
-                        "pattern": r"valid for (\S+)"})
+                        "pattern": r"valid for (\S+)", "only_with_jobs": False})
     rig2.run(T0)
     w = rig2.wakes()
     assert len(w) == 1 and "login valid for 20 min more" in w[0]["text"]
-    rig2.config(expiry={"command": rig2.script("s.py", "print('valid for 0h5m3s')\n"), "pattern": r"valid for (\S+)"})
+    rig2.config(expiry={"command": rig2.script("s.py", "print('valid for 0h5m3s')\n"), "pattern": r"valid for (\S+)",
+                        "only_with_jobs": False})
     rig2.run(at(15))
     assert rig2.wakes() == []  # the same login, read again as a duration a few seconds off
 
@@ -1329,3 +1333,116 @@ def test_expiry_is_off_by_default(tmp_path):
     rig.config()
     p = rig.run(T0, "--verbose")
     assert "expiry" not in p.stdout and rig.wakes() == []
+
+
+def test_expiry_only_while_a_job_file_is_open_and_to_its_owners(tmp_path):
+    rig = Rig(tmp_path)
+    out = tmp_path / "status.txt"
+    out.write_text("  Valid until: 2026-01-07 12:45:00 +0000\n")  # 45 min left at T0
+    calls = tmp_path / "calls.txt"
+    status = rig.script("status.py", f"open({str(calls)!r}, 'a').write('x')\nprint(open({str(out)!r}).read(), end='')\n")
+    listing = tmp_path / "listing.txt"
+    listing.write_text("101 RUN\n")
+    bjobs = rig.script("bjobs.py", f"print(open({str(listing)!r}).read(), end='')\n")
+    shared = rig.state_dir / "jobs"
+    rig.config(jobs={"command": bjobs}, expiry={"command": status, "name": "tsh",
+                                                "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
+    p = rig.run(T0, "--verbose")
+    assert rig.wakes() == [] and not calls.exists()  # no job file: the login is not even read
+    assert "tsh not checked, no open job file" in p.stdout
+    shared.mkdir(parents=True)
+    (shared / "a.json").write_text(json.dumps({"thread": "child-7", "jobs": ["101"]}))
+    (shared / "b.json").write_text(json.dumps({"thread": "child-8", "jobs": ["101"]}))
+    rig.run(at(1))
+    w = rig.wakes()
+    assert sorted(x["thread"] for x in w) == ["child-7", "child-8"]  # the owners, not the orchestrator
+    assert all("tsh valid for 44 min more" in x["text"] for x in w)
+    rig.run(at(2))
+    assert rig.wakes() == []  # once per expiry time and recipient
+    (shared / "c.json").write_text(json.dumps({"thread": "child-9", "jobs": ["101"]}))
+    rig.run(at(3))
+    assert [x["thread"] for x in rig.wakes()] == ["child-9"]  # a new owner gets it too
+    listing.write_text("101 DONE\n")
+    rig.run(at(20))
+    assert all(x["text"].startswith("watcher: jobs:") for x in rig.wakes())  # jobs ended: their own wake only
+    out.write_text("Not logged in.\n")
+    n = len(calls.read_text())
+    rig.run(at(40))
+    assert rig.wakes() == [] and len(calls.read_text()) == n  # all files ended: no check, no wake
+
+
+def test_expiry_still_warns_when_the_jobs_check_fails_on_the_same_login(tmp_path):
+    rig = Rig(tmp_path)
+    proj = tmp_path / "proj"
+    (proj / ".work/orchestrator/jobs").mkdir(parents=True)
+    (proj / ".work/orchestrator/jobs/t.json").write_text(json.dumps({"thread": "child-7", "jobs": ["101"]}))
+    fail = rig.script("fail.py", "import sys; sys.exit(255)\n")
+    rig.config(projects=[str(proj)], jobs={"command": fail},
+               expiry={"command": rig.script("s.py", "print('Not logged in.')\n"), "name": "tsh",
+                       "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
+    rig.run(T0)
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == ["child-7"] and "tsh: no validity found" in w[0]["text"]
+
+
+def test_expiry_state_from_before_warned_to_does_not_repeat(tmp_path):
+    rig = Rig(tmp_path)
+    shared = rig.state_dir / "jobs"
+    shared.mkdir(parents=True)
+    (shared / "a.json").write_text(json.dumps({"thread": "child-7", "jobs": ["101"]}))
+    rig.config(jobs={"command": rig.script("b.py", "print('101 RUN')\n")},
+               expiry={"command": rig.script("s.py", "print('Not logged in.')\n"),
+                       "pattern": r"Valid until:\s+(\S+)"})
+    (rig.state_dir / "watch.json").write_text(json.dumps({"initialised": ["jobs", "expiry"],
+                                                          "expiry": {"warned": "unreadable"}}))
+    rig.run(T0)
+    assert rig.wakes() == []
+
+
+# ---------- job files from any project ----------
+
+def test_jobs_from_the_shared_dir_and_globs(tmp_path):
+    rig = Rig(tmp_path)
+    listing = tmp_path / "listing.txt"
+    listing.write_text("101 RUN\n202 RUN\n303 RUN\n")
+    other = tmp_path / "Wings" / ".work" / "orchestrator" / "jobs"
+    other.mkdir(parents=True)
+    (other / "eval.json").write_text(json.dumps({"thread": "child-g", "jobs": ["202"]}))
+    (other / "done").mkdir()
+    (other / "done" / "old.json").write_text(json.dumps({"thread": "child-old", "jobs": ["303"]}))
+    proj = tmp_path / "proj"
+    rig.config(projects=[str(proj)], jobs={"command": rig.script("b.py", f"print(open({str(listing)!r}).read())\n"),
+                                           "globs": [str(tmp_path / "*" / ".work/orchestrator/jobs")]})
+    (proj / ".work/orchestrator").mkdir(parents=True)
+    (proj / ".work/orchestrator/jobs").symlink_to(other)  # the same files twice count once
+    p = rig.run(None, "add", "--job", "101", "--next-step", "read state.md",
+                extra_env={"T3CODE_THREAD_ID": "thread:delegated-task:command%3Amcp%3Aabc"})
+    assert "watcher job file:" in p.stdout
+    data = json.loads((rig.state_dir / "jobs" / "101.json").read_text())
+    assert data == {"thread": "thread:delegated-task:command%3Amcp%3Aabc", "jobs": ["101"],
+                    "next_step": "read state.md"}
+    rig.run(T0)
+    assert rig.wakes() == []
+    listing.write_text("303 RUN\n")
+    rig.run(at(15))
+    w = sorted(rig.wakes(), key=lambda x: x["thread"])
+    assert [x["thread"] for x in w] == ["child-g", "thread:delegated-task:command%3Amcp%3Aabc"]
+    assert "101.json: all 1 jobs ended" in w[1]["text"] and "Next step: read state.md" in w[1]["text"]
+
+
+def test_add_needs_a_thread_and_refuses_bad_ids_or_overwrites(tmp_path):
+    rig = Rig(tmp_path)
+    rig.config()
+    p = rig.run(None, "add", "--job", "101", check=False)
+    assert p.returncode == 2 and "T3CODE_THREAD_ID" in p.stderr
+    p = rig.run(None, "add", "--job", "101; rm -rf ~", "--thread", "t1", check=False)
+    assert p.returncode == 2 and "invalid job id" in p.stderr
+    p = rig.run(None, "add", "--job", "101", "--thread", "bad thread", check=False)
+    assert p.returncode == 2
+    d = tmp_path / "pj"
+    rig.run(None, "add", "-j", "5[1]", "-j", "6", "--thread", "t1", "--parent", "p1", "--name", "ev", "--dir", str(d))
+    assert json.loads((d / "ev.json").read_text()) == {"thread": "t1", "jobs": ["5[1]", "6"], "parent": "p1"}
+    p = rig.run(None, "add", "-j", "7", "--thread", "t1", "--name", "ev", "--dir", str(d), check=False)
+    assert p.returncode == 1 and "exists" in p.stderr
+    rig.run(None, "add", "-j", "7", "--thread", "t1", "--name", "ev", "--dir", str(d), "--force")
+    assert json.loads((d / "ev.json").read_text())["jobs"] == ["7"]

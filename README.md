@@ -90,18 +90,34 @@ chat once, with a short message that starts with the reason, e.g. `watcher: jobs
 
 | Check | Wakes | When |
 |---|---|---|
-| `jobs` | the thread named in the job file | every job in a `<project>/.work/orchestrator/jobs/<name>.json` ended, or one failed |
+| `jobs` | the thread named in the job file | every job in a job file ended, or one failed (where job files live: below) |
 | `children` | the child's parent | a T3 child thread's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
 | `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`. With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
 | `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
 | `decision` | the child's parent | a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, and T3 never relayed it to the parent (the turn was started by an outside send, such as a jobs wake) nor did the child send the parent a message with `t3_thread_send` after it, or a report (`handoff (subject): ...` counts) earlier in that turn, idle for 30 min (`"children": false` turns it off) |
-| `expiry` | the orchestrator (or `thread`), urgent | off unless configured: `command` prints a login's validity and `pattern` captures its end time or the time left in group 1. Wakes once per expiry time when less than `warn_minutes` (60) are left, or when the pattern no longer matches (logged out). E.g. `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}` |
+| `expiry` | the owners of the open job files, urgent | off unless configured: `command` prints a login's validity and `pattern` captures its end time or the time left in group 1. Runs only while a job file is open (not yet reported as ended), and wakes the threads that own those files, once per expiry time each, when less than `warn_minutes` (60) are left or the pattern no longer matches (logged out). With no open job file the command does not run. `"only_with_jobs": false` restores the old behaviour: always checked, wakes the orchestrator (or `thread`). E.g. `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}` |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
 
-A job file is what a child writes before it ends its turn on a long wait:
+A job file is what a chat writes before it ends its turn on a long wait:
 `{"thread": "<owner thread id>", "parent": "<owner's parent thread id>", "jobs": ["4711", "4712"], "next_step":
-"read results/metrics.json"}` (`jobs` defaults to the file name, `parent` is optional). T3 does not tell a parent
+"read results/metrics.json"}` (`jobs` defaults to the file name, `parent` is optional). The simplest way, from any
+project and without looking up an id, is the `add` command:
+
+```bash
+python3 ~/src/orchestack/watcher/watch.py add --job 4711 --job 4712 --next-step "read .work/state.md"
+```
+
+It writes `~/.local/state/orchestack/jobs/4711.json` (`--name` sets the name, `--dir` another directory,
+`--force` replaces a file of that name) with the thread taken from `$T3CODE_THREAD_ID`, which T3 sets in the shell
+of every chat, delegates included. Outside a T3 shell pass `--thread <id>`: the T3 tool `orchestrator_capabilities`
+returns the calling chat's own id as `parentThreadId` (the parent its delegates would get). `--parent` is optional:
+the watcher reads the parent from the thread's lineage. A chat that moves to another thread (e.g. to another account)
+writes a new job file with its new id. The watcher reads job files, non-recursively (so `jobs/done/` is never read), from:
+each configured project's `.work/orchestrator/jobs/`, each directory in `jobs.dirs`, the shared
+`~/.local/state/orchestack/jobs/` (`$ORCHESTACK_STATE_DIR/jobs`), and every match of `jobs.globs` (e.g.
+`"~/code/*/.work/orchestrator/jobs"`, where a matched directory means its `*.json`). A file reached twice counts once.
+After the wake, the chat moves its file to `done/` next to it. T3 does not tell a parent
 when a turn started by an outside send ends, so the wake tells a child owner to send its result to its parent with
 `t3_thread_send` (mode "queue"), naming the parent from `parent` or else from the thread's lineage. `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
 `["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job

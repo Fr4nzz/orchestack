@@ -5,7 +5,9 @@ A systemd --user timer (watcher/orchestack-watch.timer) runs this every 15 minut
 configured checks, compares what it sees with the last run and sends one short message per change to the chat that
 owns it. The same state never wakes anyone twice.
 
-  jobs      cluster jobs named in <project>/.work/orchestrator/jobs/*.json ended or failed -> the owner thread
+  jobs      cluster jobs named in job files ended or failed -> the owner thread. Job files are read from
+            <project>/.work/orchestrator/jobs/, jobs.dirs, jobs.globs and the shared <state dir>/jobs/, which
+            `watch.py add` writes to from any project
   children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread
   disk      free disk below the floor -> the orchestrator (urgent)
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
@@ -13,7 +15,8 @@ owns it. The same state never wakes anyone twice.
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
             thread send from the child there) for 30 min -> its parent
-  expiry    a login (e.g. tsh) has less than warn_minutes left or is gone -> the orchestrator (urgent, opt-in)
+  expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owners
+            of the open job files (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -21,6 +24,8 @@ URL. At most one wake per thread per hour (disk and failures excepted). Wakes he
 stay in an outbox and go out merged with later ones.
 
   watch.py [--dry-run] [--verbose] [--no-baseline] [--now ISO-TIME]
+  watch.py add --job ID [--job ID ...] [--thread ID] [--parent ID] [--next-step TEXT] [--name NAME] [--dir DIR]
+           (registers a job file; the thread defaults to $T3CODE_THREAD_ID, which T3 sets in every chat's shell)
 
 --dry-run prints what it would do and changes nothing (no state written, no wake sent, no command run except the
 read-only checks). Config: the "watcher" section of config.json in $ORCHESTACK_CONFIG_DIR or ~/.config/orchestack.
@@ -32,6 +37,7 @@ orchestrator once. Exit 0 unless the config is unreadable.
 import argparse
 import copy
 import fcntl
+import glob
 import json
 import os
 import re
@@ -295,6 +301,65 @@ def projects(ctx):
     return [Path(os.path.expanduser(p)) for p in ctx.cfg.get("projects") or []]
 
 
+def shared_jobs_dir():
+    """The job directory any project can use (`watch.py add` writes here): <state dir>/jobs."""
+    return state_dir() / "jobs"
+
+
+def job_files(ctx):
+    """Every job file: <project>/.work/orchestrator/jobs/*.json for each configured project, each of jobs.dirs, the
+    shared <state dir>/jobs/, and every file matched by jobs.globs (a pattern matching a directory means its *.json).
+    Not recursive, so jobs/done/ is never read. A file reached twice counts once, under the first path found."""
+    sec = ctx.section("jobs")
+    dirs = [p / ".work" / "orchestrator" / "jobs" for p in projects(ctx)]
+    dirs += [Path(os.path.expanduser(d)) for d in sec.get("dirs") or []]
+    dirs.append(shared_jobs_dir())
+    found = [f for d in dirs if d.is_dir() for f in sorted(d.glob("*.json"))]
+    for pattern in sec.get("globs") or []:
+        for hit in sorted(glob.glob(os.path.expanduser(str(pattern)))):
+            hit = Path(hit)
+            found += sorted(hit.glob("*.json")) if hit.is_dir() else [hit] if hit.suffix == ".json" else []
+    out, seen = [], set()
+    for f in found:
+        try:
+            real = f.resolve()
+        except OSError:
+            continue
+        if real not in seen and f.is_file():
+            seen.add(real)
+            out.append(f)
+    return sorted(out)
+
+
+def read_job_file(f):
+    """(owner thread, job ids, next step, parent) from a job file. Raises on a malformed one."""
+    data = json.loads(f.read_text(encoding="utf-8"))
+    return (str(data["thread"]), [str(j) for j in (data.get("jobs") or [f.stem])],
+            str(data.get("next_step") or ""), str(data.get("parent") or ""))
+
+
+def open_job_owners(ctx):
+    """Owner threads of the job files still open: readable, not yet reported as ended by the jobs check, and (before
+    the jobs check has run once) younger than KEEP_DAYS. Reads the committed jobs state, so a jobs check that failed
+    this run (e.g. the cluster login it needs ran out) leaves its files open."""
+    reported = (ctx.state.get("jobs") or {}).get("reported") or {}
+    too_old = (ctx.now - timedelta(days=KEEP_DAYS)).timestamp()
+    owners = []
+    for f in job_files(ctx):
+        try:
+            st = f.stat()
+            if reported.get(f"{f}:{st.st_mtime_ns}", {}).get("ended"):
+                continue
+            if "jobs" not in ctx.state and st.st_mtime < too_old:
+                continue
+            thread = read_job_file(f)[0]
+        except Exception:
+            continue
+        if THREAD_ID_RE.match(thread) and thread not in owners:
+            owners.append(thread)
+    return owners
+
+
 def prune(seen, now, active=(), days=KEEP_DAYS):
     """Forget resolved events (not in active) older than days. Active events are kept, so they never wake again."""
     cutoff = iso(now - timedelta(days=days))
@@ -310,9 +375,7 @@ def check_jobs(ctx):
     st, baseline = ctx.check_state("jobs")
     reported = st.setdefault("reported", {})
     seen_jobs = st.setdefault("seen_jobs", {})
-    dirs = [p / ".work" / "orchestrator" / "jobs" for p in projects(ctx)]
-    dirs += [Path(os.path.expanduser(d)) for d in sec.get("dirs") or []]
-    files = sorted(f for d in dirs if d.is_dir() for f in d.glob("*.json"))
+    files = job_files(ctx)
     groups = []
     too_old = (ctx.now - timedelta(days=KEEP_DAYS)).timestamp()
     for f in files:
@@ -322,16 +385,13 @@ def check_jobs(ctx):
             ctx.note(f"jobs: ignored {f.name}, older than {KEEP_DAYS} days (move it to jobs/done/)")
             continue
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            thread = str(data["thread"])
-            jobs = [str(j) for j in (data.get("jobs") or [f.stem])]
+            thread, jobs, next_step, parent = read_job_file(f)
         except Exception as e:
             ctx.note(f"jobs: skipped {f.name}: {e}")
             continue
         if reported.get(key, {}).get("ended"):
             continue
-        groups.append((f, key, thread, jobs, str(data.get("next_step") or ""), f.stat().st_mtime,
-                       str(data.get("parent") or "")))
+        groups.append((f, key, thread, jobs, next_step, f.stat().st_mtime, parent))
     live = {f"{f}:{f.stat().st_mtime_ns}" for f in files}
     for key in [k for k in reported if k not in live]:
         del reported[key]
@@ -801,16 +861,26 @@ def parse_validity(text, now, tz):
 
 def check_expiry(ctx):
     """A login runs out soon (e.g. `tsh status`, "Valid until"). Off unless configured: `command` prints the
-    validity, `pattern` (a regex) captures its end time or the duration left in group 1. Wakes the orchestrator (or
-    `thread`) once per expiry time when less than `warn_minutes` (60) are left, or when the pattern no longer
-    matches (logged out). A renewal brings a new expiry time, and with it a new wake later. Times within
-    5 min of the one already reported count as the same login (a duration read each run drifts by seconds)."""
+    validity, `pattern` (a regex) captures its end time or the duration left in group 1. Only while a job file is
+    open (`only_with_jobs`, default true): then it wakes the owner threads of the open job files, the ones whose
+    jobs need the login, and runs no command at all otherwise. With `only_with_jobs` false it always checks and
+    wakes the orchestrator (or `thread`). Each recipient is woken once per expiry time when less than
+    `warn_minutes` (60) are left, or when the pattern no longer matches (logged out). A renewal brings a new expiry
+    time, and with it a new wake later. Times within 5 min of the one already reported count as the same login (a
+    duration read each run drifts by seconds)."""
     sec = ctx.section("expiry")
     st, _ = ctx.check_state("expiry")
     cmd, pattern = sec.get("command"), sec.get("pattern")
     if not cmd or not pattern:
         raise ValueError("expiry needs command and pattern")
     name = sec.get("name") or "login"
+    if sec.get("only_with_jobs", True):
+        targets = open_job_owners(ctx)
+        if not targets:
+            ctx.note(f"expiry: {name} not checked, no open job file")
+            return
+    else:
+        targets = [sec.get("thread") or ctx.orchestrator]
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 30)))
     if rc is None:
         raise RuntimeError(f"expiry command failed: {short(err, 120)}")
@@ -832,13 +902,21 @@ def check_expiry(ctx):
                                    else "no validity found"))
     if left is not None and left >= warn:
         st.pop("warned", None)
+        st.pop("warned_to", None)
         return
     warned = st.get("warned")
-    if warned == key or (left is not None and warned not in (None, "unreadable")
-                         and abs(parse_iso(warned) - until) <= timedelta(minutes=5)):
+    same = warned == key or (left is not None and warned not in (None, "unreadable")
+                             and abs(parse_iso(warned) - until) <= timedelta(minutes=5))
+    told = set(st.get("warned_to") or []) if same else set()
+    if "warned_to" not in st and same:  # state from before warned_to: that warning went to the old recipient
+        told = set(targets)
+    new = [t for t in targets if t not in told]
+    if not new:
         return
-    st["warned"] = key
-    ctx.wake(sec.get("thread") or ctx.orchestrator, "expiry", text, urgent=True)
+    st["warned"] = warned if same else key
+    st["warned_to"] = sorted(told | set(new))
+    for t in new:
+        ctx.wake(t, "expiry", text, urgent=True)
 
 
 def check_hosts(ctx):
@@ -1010,7 +1088,55 @@ def save_state(path, state):
     os.replace(tmp, path)
 
 
+def add_main(argv):
+    """`watch.py add`: write a job file into the shared job directory (or --dir), from any project."""
+    ap = argparse.ArgumentParser(prog="watch.py add", description=(
+        "Register cluster jobs with the watcher. It wakes --thread once all of them ended, or one failed."))
+    ap.add_argument("--job", "-j", action="append", required=True, help="a job id (repeat for several)")
+    ap.add_argument("--thread", default=os.environ.get("T3CODE_THREAD_ID", ""),
+                    help="the thread to wake (default: $T3CODE_THREAD_ID, set by T3 in every chat's shell)")
+    ap.add_argument("--parent", default="", help="the owner's parent thread (optional: the watcher reads the lineage)")
+    ap.add_argument("--next-step", default="", help="what the woken chat should do first, e.g. read a state file")
+    ap.add_argument("--name", default="", help="job file name without .json (default: the first job id)")
+    ap.add_argument("--dir", default="", help=f"directory to write to (default: {shared_jobs_dir()})")
+    ap.add_argument("--force", action="store_true", help="replace a job file of the same name")
+    args = ap.parse_args(argv)
+    thread = args.thread.strip()
+    if not thread or not THREAD_ID_RE.match(thread):
+        print("watch.py add: no valid --thread and no T3CODE_THREAD_ID in the environment. In T3 the shell has"
+              " T3CODE_THREAD_ID; otherwise pass your own id: T3 tool orchestrator_capabilities shows it as parentThreadId.",
+              file=sys.stderr)
+        return 2
+    if args.parent and not THREAD_ID_RE.match(args.parent):
+        print(f"watch.py add: invalid --parent {args.parent!r}", file=sys.stderr)
+        return 2
+    jobs = [str(j).strip() for j in args.job]
+    bad = [j for j in jobs if not SAFE_JOB_RE.match(j)]
+    if bad:
+        print(f"watch.py add: invalid job id(s): {', '.join(bad)}", file=sys.stderr)
+        return 2
+    name = args.name or jobs[0]
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", name[:-5] if name.endswith(".json") else name).strip(".") or "jobs"
+    d = Path(os.path.expanduser(args.dir)) if args.dir else shared_jobs_dir()
+    path = d / f"{name}.json"
+    if path.exists() and not args.force:
+        print(f"watch.py add: {path} exists (another wait on these jobs?). Use --name or --force.", file=sys.stderr)
+        return 1
+    data = {"thread": thread, "jobs": jobs, **({"parent": args.parent} if args.parent else {}),
+            **({"next_step": args.next_step} if args.next_step else {})}
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)  # *.json.tmp is never read as a job file
+    print(f"watcher job file: {path}\n  wakes {thread} once jobs {', '.join(jobs)} ended (or one failed)."
+          f" After the wake, move it to {d / 'done'}/.")
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["add"]:
+        return add_main(argv[1:])
     ap = argparse.ArgumentParser(description="orchestack watcher: wake a chat only when something changed.")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
     ap.add_argument("--verbose", "-v", action="store_true", help="print every check's observations")

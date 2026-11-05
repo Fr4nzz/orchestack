@@ -22,6 +22,12 @@
   child's message, or earlier in the turn as a report with a subject (`handoff (s05): ...`).
 - Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
   `warn_minutes` left, or no longer matches the pattern, wakes the orchestrator once.
+- Watcher `expiry` runs only while a job file is open and wakes the owners of those files instead of the
+  orchestrator (`"only_with_jobs": false` keeps the old always-on check). It no longer wakes a large orchestrator
+  every few hours when no job runs.
+- Watcher job files from any project: the shared `~/.local/state/orchestack/jobs/` and `jobs.globs` join the
+  project list and `jobs.dirs`. `watch.py add --job <id> ...` writes a job file there, taking the thread from
+  `$T3CODE_THREAD_ID`, so a worker needs neither a configured project nor its own thread id.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.
