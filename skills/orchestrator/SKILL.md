@@ -84,7 +84,11 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 14. **Status checks read each child's live run state** (running, idle, failed, waiting on approval), not only logs.
     After an outage (full disk, provider failure, harness restart), fix what still fails, then resume what broke,
-    checking for uncommitted edits first.
+    checking for uncommitted edits first. After you move a child to another account or thread, restart it, or
+    the cluster login expires, list every child that was waiting on an external job and confirm each one still
+    has a live wake (a watcher job file or a running background wait). A pending background wait does not
+    survive the move. "It was only waiting on the cluster" is not safe: one result sat unread for 6.6 h that
+    way. Check a silent child at its projected finish.
 15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
     done-check before reporting it done. Before handing the user a link or file, open it the way they will.
 16. **Deploy finished, tested work by default** where the project allows it, always with a rollback path.
