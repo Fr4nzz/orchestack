@@ -20,6 +20,9 @@
   (with `watcher/lsf_job_states.sh` for LSF: `bjobs -a`, `bacct`, `bhist`) reads how they ended.
 - Watcher `decision`: a child's own `t3_thread_send` to its parent counts as delivered when it comes after the
   child's message, or earlier in the turn as a report with a subject (`handoff (s05): ...`).
+  The subject may also come first when bold, dash-separated or a code-like token (`cls-freeze handoff: ...`,
+  `**Retrain stage** - done:`). Free prose before the word (`Download done: now training`) and negations
+  (`not yet done:`) stay progress, so they cannot silence the real report.
 - Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
   `warn_minutes` left, or no longer matches the pattern, wakes the orchestrator once.
 - Watcher `expiry` runs only while a job file is open and wakes the owners of those files instead of the

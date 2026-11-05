@@ -773,6 +773,26 @@ def test_child_report_sent_with_a_subject_or_after_the_message_is_quiet(tmp_path
     assert len(rig3.wakes()) == 1
 
 
+def test_child_report_sent_with_its_subject_first_is_quiet(tmp_path):
+    for i, text in enumerate(("cls-freeze handoff: the dev guards say GO",
+                              "**Retrain stage** - done (s05): trained",
+                              "Classifier freeze \u2014 **failed**: s05 OOM",
+                              "_done_ \u2014 s05: trained")):
+        (tmp_path / str(i)).mkdir()
+        rig, conn = child_result_rig(tmp_path / str(i), "handoff: the dev guards say GO")
+        child_sends(conn, "s1", text, at(9))  # earlier in the turn, before its final message
+        rig.run(at(45))
+        assert rig.wakes() == [], text
+    for i, text in enumerate(("Not done: still training", "not **done**: epoch 30", "Training not yet done: 30/40",
+                              "isn’t done: epoch 30", "Step 1 of 3 done: starting step 2",
+                              "Download failed: retrying on the mirror", "Done with step 1 of 3: moving on")):
+        (tmp_path / f"n{i}").mkdir()
+        rig, conn = child_result_rig(tmp_path / f"n{i}", "done: s05 trained")
+        child_sends(conn, "s1", text, at(9))
+        rig.run(at(45))
+        assert len(rig.wakes()) == 1, text  # progress, not a report: the real one still wakes
+
+
 def child_sends(conn, mid, text, created):
     conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?, ?, ?, 0, ?, ?, ?)",
                  (mid, "orch-1", "user", created, created, json.dumps({"text": text, "senderThreadId": CHILD})))

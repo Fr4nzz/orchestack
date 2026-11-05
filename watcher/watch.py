@@ -57,9 +57,15 @@ UTC = timezone.utc
 ACTIVE = ("queued", "preparing", "starting", "running", "waiting")
 DECISION_RE = re.compile(r"^\s*[*_>]*\s*decision:", re.I | re.M)
 RESULT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff):", re.I)  # a child's report to its parent
-# A report the child sent its parent itself may name its subject first: "handoff (s05): ...", "**done** - s05:".
-SENT_REPORT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff)[*_]*\s*(\([^)\n]{1,60}\)|[-\u2013]\s*[^:\n]{1,40})?"
-                            r"[*_]*\s*:", re.I)
+# A report the child sent its parent itself may name its subject after the word ("handoff (s05): ...",
+# "**done** - s05:") or before it, set off by bold, a spaced dash or a single code-like token ("**Retrain stage**
+# done:", "Classifier freeze - failed:", "cls-freeze handoff:"). Free prose before the word ("Download done: now
+# training") and negations ("not yet done:", "isn't done:") are progress: counting them would lose a real report.
+SENT_REPORT_RE = re.compile(
+    r"^\s*(?![^:\n]{0,80}?(?:n['\u2019]t|(?<![A-Za-z])(?:not|never|yet|almost|nearly)(?![A-Za-z])))"
+    r"(?:\*\*[^*:\n]{1,60}\*\*\s*(?:[-\u2013\u2014]\s*)?|[^*:\n]{1,60}?\s[-\u2013\u2014]\s+|[\w.]*[-\d][\w.-]*\s+)?"
+    r"[*_>`\s]*(?<![A-Za-z])(decision|done|failed|handoff)[*_`]*\s*"
+    r"(\([^)\n]{1,60}\)|[-\u2013\u2014]\s*[^:\n]{1,40})?[*_`]*\s*:", re.I)
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
@@ -764,7 +770,7 @@ def turn_start(db, child, created):
 def child_decision_relayed(db, parent, child, created, since=None):
     """The parent has the child's message: a T3 relay after it, or a message the child sent the parent itself with
     t3_thread_send (T3 records the sender in the payload's senderThreadId): any such send at or after the child's
-    message, or a report (decision/done/failed/handoff, optionally with a subject before the colon) sent earlier in
+    message, or a report (decision/done/failed/handoff, optionally with a subject before or after the word) sent earlier in
     that turn (since `since`, the turn's start). A turn the parent started with its own send does not count: whether
     the parent read the answer is unknown, and a spare wake costs less than a lost report."""
     since = min(since or created, created)
