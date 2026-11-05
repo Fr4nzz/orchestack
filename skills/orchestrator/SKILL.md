@@ -52,12 +52,13 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 ## Waiting
 
 8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
-   the job runs or 30 min pass, see the cluster skill), write a job
-   file `.work/orchestrator/jobs/<name>.json` in the project (`{"thread": "<your thread id>", "parent": "<your parent's thread id>",
-   "jobs": ["<id>"], "next_step": "..."}`, `parent` only if you know it, else the watcher uses lineage) and a state file (outputs, next step), and end the turn with `handoff:`. The watcher
+   the job runs or 30 min pass, see the cluster skill), register the wait with
+   `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..."` (it writes a job file to
+   `~/.local/state/orchestack/jobs/`, works from any project, and takes the thread id from `$T3CODE_THREAD_ID`.
+   `--parent` is optional, else the watcher uses lineage), write a state file (outputs, next step), and end the turn with `handoff:`. The watcher
    wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the
    projected finish instead. At the wake, a fresh worker (or the child) reads the state file, moves the job file
-   to `jobs/done/` and reports `done:` or `failed:`. A child woken by the watcher sends that report to its parent
+   to the `done/` folder next to it and reports `done:` or `failed:`. A child woken by the watcher sends that report to its parent
    with `t3_thread_send` (mode "queue"), because the end of a turn the watcher started does not notify the parent. A background wait that times out after 2 h returns to an expired cache and costs more.
 9. **Short waits (under about 1 h): wait inside one tool call, without ending the turn,** because a child's turn
    end wakes its parent whatever it says. Claude: one background command or Monitor that exits when every job has
