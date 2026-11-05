@@ -71,6 +71,7 @@ Review only. Do not edit, commit, push, deploy, comment on PRs, or start subagen
 Repo: <abs path>  Work: <diff command, paths, URL or screenshots>  Base: <sha>
 Reader or user: <who it is for>  Intent: <what it must achieve>  Out of scope: <...>
 Checks: <tests or checks run, results, gaps>  Sources to check against: <tracked files>
+Ground truth: <independent checks or reference figures to check against, or "none": say what you cannot verify>
 Read the surrounding code or text. Find bugs, broken callers, wrong or misleading claims, mismatch with intent.
 Hold to the smallest change that meets the intent. Flag code, text or guards the intent does not need.
 Other paths, rare cases, small perf, extra compat and style: nits.
@@ -89,6 +90,11 @@ severity yourself. Another path, rare case or small cost is a nit, whatever labe
   happened. Add one focused test that fails without the fix, if the intent needs it.
 - Disagree: say why, with evidence (file:line, a number, a test, output).
 - Out of scope or nit: decline in one line and list it as a follow-up.
+- Exception to fixing the case that happened: when the same symptom comes back in a later finding of this loop,
+  find the shared cause, test it and fix that, because local patches to one cause keep resurfacing. Hiding a symptom
+  (erasing output, dropping the item, special-casing it in a score) is not a fix.
+- Before declining a fix as "does not scale", count the items and estimate the effort (agent or person), because
+  the count is cheap and the guess is often wrong.
 
 Update the ledger. Re-run checks and `git diff --shortstat <base>`. If review grew the diff, cut first. Do not
 agree just to end the loop.
@@ -105,6 +111,10 @@ check open ids and changed work only, and to mark each old id `resolved` or `sti
 - **Agreed:** no open blocker or should from either critic on the current work, and no concern of your own.
 - **Stuck:** an item stays disputed after two replies, or the budget ends. Show both sides in 2 to 3 lines each and
   let the user or the orchestrator decide. The end of the budget is not approval.
+- **Unvalidated:** output whose correctness is spatial or needs domain judgement, checked only by the worker's own
+  metrics, is reported as "unvalidated", not "accepted", even when both critics approve, so readers know nothing
+  independent has checked it. It is a label, not a stop: work continues. It lifts when a check that does not reuse
+  the worker's method passes (known-answer cases, an outside reference, human feedback).
 - Shipping still needs its usual authorisation. Do not push during the loop. Push after agreement only if the user
   asked to push, ship or update the PR. If you push to a PR, add above the model blurb, naming only critics that
   completed: `Reviewed with sol-loop: <N> rounds, Sol + Opus. Verdicts: Sol <grade>, Opus <grade>.`

@@ -31,6 +31,13 @@
 - Watcher job files from any project: the shared `~/.local/state/orchestack/jobs/` and `jobs.globs` join the
   project list and `jobs.dirs`. `watch.py add --job <id> ...` writes a job file there, taking the thread from
   `$T3CODE_THREAD_ID`, so a worker needs neither a configured project nor its own thread id.
+- `bulk-image-review`: new section "Geometry checks are not label checks": for spatial correctness, measure parts not
+  the outline, review the critical region at full resolution, build known-answer cases, and leave one page of crops
+  for a human spot check, whose feedback overrides the agent's checks. One worked example.
+- `sol-loop`: a recurring symptom means finding the shared cause, no "does not scale" decline without counting the
+  items, a `Ground truth:` line in the brief, and spatial or domain-judgement output checked only by the worker's
+  own metrics is labelled "unvalidated" (a label, not a stop).
+- `orchestrator`: one owner per lane, other chats forward feedback to it instead of dispatching.
 - `scripts/install.sh --watcher` installs and enables the timer (off by default). `--uninstall` removes it.
 - `orchestrator` skill: the watcher replaces AI scheduled checks (one-off projected-finish wakes only), long waits
   write a job file, and a new Backlog section defines `.work/orchestrator/IDEAS.md` and the backlog prompt.

@@ -50,6 +50,23 @@ The per-item figures above are only a sanity check on the pilot.
 8. **Human confirmation on a sample.** In the transcription job the user checked 40 of 300 items, found no corrections,
    and accepted the rest.
 
+## Geometry checks are not label checks
+
+When correctness is spatial (placement, overlap, layer order, alignment), trust neither a whole-outline metric nor
+your own eye on small panels. Build an independent check and keep going.
+
+1. **Measure the parts, not the outline.** Score each part on its own, because a silhouette metric (union IoU, mask
+   area) cannot see where the parts inside it sit.
+2. **Look at the critical region at full resolution** (an exception to pattern 2), because small whole-item panels
+   hide the few pixels where the error is.
+3. **Build known-answer cases yourself** (items where the hidden part is fully visible) and drop any heuristic that
+   fails one, because a heuristic that fails a known case fails silently on the rest.
+4. **Make spot checks cheap.** Put one page of crops of the critical regions next to the result, so a person can
+   catch an error in a minute. Human feedback, when it comes, overrides your own checks.
+
+Worked example: composites of two overlapping parts passed a union IoU gate at about 0.95, and several AI critic
+rounds approved them on small panels. Per-part IoU against four hand drawings was 0.64 to 0.84 on the same items.
+
 ## Which model
 
 Tested on about 200 ground-truth cards, each reviewed twice by the default model:

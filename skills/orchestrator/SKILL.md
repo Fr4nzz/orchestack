@@ -41,6 +41,8 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
    its next real task. Leads and workers rely on harness auto-compaction. Around 500k *(soft guide)* the
    orchestrator may compact an idle lead or worker at a natural break by sending it exactly `/compact`, never to an
    orchestrator. Requests for the orchestrator are sent to it (`t3_thread_send`), not left in the requester's thread.
+   One owner per lane: a chat that gets feedback on a lane it does not own forwards it to the lane's owner instead
+   of dispatching its own workers, because two owners dispatch duplicate work.
 6. **Every wake re-reads the whole context,** about 0.1x its size within the cache lifetime (about 1 h) and about 2x
    after. So batch small items for a big idle chat into its next real task. Above about 400k, start a fresh worker
    for multi-step work instead of doing it in place (a fresh start pays back after 1 to 2 steps). Don't reuse a
