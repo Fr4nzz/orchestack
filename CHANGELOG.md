@@ -24,26 +24,28 @@
   `**Retrain stage** - done:`). Free prose before the word (`Download done: now training`) and negations
   (`not yet done:`) stay progress, so they cannot silence the real report.
 - Watcher `decision`: a T3 relay of a turn that a `t3_thread_send` started (`...%3Athread-send%3A<uuid> [completed]`)
-  counts as delivered: the watcher matches the task ids of the messages that started the child's recent runs, not
-  only the delegate task id (a false "not relayed" wake on 5 Nov).
+  counts as delivered: the watcher matches the send ids (everything after `thread-send:`) of the messages that
+  started the child's recent runs, not only the delegate task id (a false "not relayed" wake on 5 Nov).
 - Watcher `decision`, rule for progress endings: `noted:` (a progress-only turn) and `waiting: <job ids>` (a long
   wait) never wake the parent. A `handoff:` from a child that owns an open job file is the old ending of a long wait
   and stays quiet too (the jobs wake restarts the child). Every other unrelayed `handoff:` still wakes the parent,
   whoever started the turn. The orchestrator skill's rules 7 and 8 now end long waits with `waiting:`.
-- Watcher `decision`: a child whose last message is a `waiting:` or `handoff:` naming a cluster job (`waiting: <ids>`,
-  `job 4101`, `Job <4101>`) that no job file lists (open, ended or moved to `done/`, any owner) is woken itself,
-  once, and told to register the wait with `watch.py add`. A message naming no job, or a background wait, stays quiet.
+- Watcher `decision`: a child whose last message is a `waiting:` naming cluster jobs (`waiting: <ids>`, `job 4101`,
+  `Job <4101>`) that no job file lists (open, ended or moved to `done/`, any owner) is woken itself, once, and told
+  to register exactly those jobs with `watch.py add`. A `handoff:`, a wait naming no job, or one naming a background
+  wait or `Monitor` stays quiet.
 - `watch.py add --expect-min N --max-pend-h H` (both optional): the jobs check wakes the owner once when a job still
-  runs at twice its expected runtime (a straggler) or still pends H hours after registration. `jobs.running_states`
+  runs at twice its expected runtime, counted from the first time the watcher sees it running (a straggler) or still pends H hours after registration. `jobs.running_states`
   and `jobs.pending_states` default to LSF and SLURM words.
-- Watcher `jobs`: before waking a job file's owner, the watcher checks the T3 thread still exists. If it is gone, its
+- Watcher `jobs`: before waking a job file's owner, the watcher checks the T3 thread is not deleted (a thread missing
+  from the database may live in another T3 and still counts). If it is deleted, its
   parent (the file's `parent`, the lineage, else the orchestrator) is woken once with "orphaned jobs <ids> (thread
   gone)" and gets the file's later wakes.
 - Watcher `expiry`: one alert per expiry, to the owner of the oldest open job file, instead of one to every owner
   (two lanes ran the login script at once).
 - Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
   `warn_minutes` left, or no longer matches the pattern, wakes the orchestrator once.
-- Watcher `expiry` runs only while a job file is open and wakes the owners of those files instead of the
+- Watcher `expiry` runs only while a job file is open and wakes the owner of the oldest open job file instead of the
   orchestrator (`"only_with_jobs": false` keeps the old always-on check). It no longer wakes a large orchestrator
   every few hours when no job runs.
 - Watcher job files from any project: the shared `~/.local/state/orchestack/jobs/` and `jobs.globs` join the

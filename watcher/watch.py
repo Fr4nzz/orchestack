@@ -16,7 +16,7 @@ owns it. The same state never wakes anyone twice.
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
             thread send from the child there) for 30 min -> its parent (noted:/waiting: never, nor a handoff: while
-            the child owns an open job file); a waiting:/handoff: naming a job no job file lists -> the child, once
+            the child owns an open job file); a waiting: naming jobs no job file lists -> the child, once
   expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owner
             of the oldest open job file, once per expiry (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
@@ -72,9 +72,9 @@ SENT_REPORT_RE = re.compile(
 # "jobid=4101". The word "job" must come right before the number, so "4101 tiles" or "job file" never count.
 JOB_NAMED_RE = re.compile(r"(?<![A-Za-z])job(?:s|\s*ids?|ids?)?\s*(?:#|<|=|:|no\.?)?\s*(\d{4,10})(?!\d)", re.I)
 # A handoff that says the child waits some other way (a background command or monitor that restarts it).
-OWN_WAIT_RE = re.compile(r"background (?:wait|task|command|job|watch)|t3_background_wait|\bMonitor\b", re.I)
-NOJOB_TEXT = ("Your handoff left no watcher job file, so nothing will wake you. Register the wait with"
-              " `python3 {watch} add --job {job} --next-step \"...\"` and check the file exists, or wait inside one"
+OWN_WAIT_RE = re.compile(r"background (?:wait|task|command|job|watch)|t3_background_wait|(?-i:\bMonitor\b)", re.I)
+NOJOB_TEXT = ("Your message left no watcher job file, so nothing will wake you. Register the wait with"
+              " `python3 {watch} add {jobs} --next-step \"...\"` and check the file exists, or wait inside one"
               " tool call.")
 # A child's progress endings, which wake no parent: "noted:" (progress only) and "waiting:" (a long wait, followed by
 # the job ids: "waiting: 4101, 4102 (GPU pilot)").
@@ -372,30 +372,32 @@ def job_limits(f):
 
 
 def oldest_open_job_owner(ctx):
-    """The owner of the oldest open job file (by modification time), or None."""
+    """(owner, parent) of the oldest open job file (by modification time), or None."""
     found = []
     for f in job_files(ctx):
         try:
-            found.append((f.stat().st_mtime, str(f), read_job_file(f)[0]))
+            data = read_job_file(f)
+            found.append((f.stat().st_mtime, str(f), data[0], data[3]))
         except Exception:
             continue
     owners = set(open_job_owners(ctx))
-    for _m, _f, thread in sorted(found):
+    for _m, _f, thread, parent in sorted(found):
         if thread in owners:
-            return thread
+            return thread, parent
     return None
 
 
 def resolve_owner(ctx, thread, parent=""):
     """(thread to wake, gone) for a job owner: the owner while its T3 thread exists, else its parent (the job file's
-    `parent`, the lineage, or the orchestrator). Without a T3 database the owner is taken as it is."""
+    `parent`, the lineage, or the orchestrator). Gone means its thread row is marked deleted: a missing row may be a
+    thread in another T3 database, so it counts as existing, as does any owner without a T3 database."""
     try:
         row = ctx.db().execute(Q_THREAD, (thread,)).fetchone()
     except Exception:
         return thread, False
-    if row and not row[2]:  # exists (an archived thread still takes a send)
+    if not row or not row[2]:  # exists, or unknown here (an archived thread still takes a send)
         return thread, False
-    for cand in (parent, row[1] if row else None):
+    for cand in (parent, row[1]):
         if cand and THREAD_ID_RE.match(str(cand)) and ctx.thread(cand):
             return cand, True
     return ctx.orchestrator, True
@@ -502,13 +504,13 @@ def check_jobs(ctx):
             got = listed.get(j)
             last = norm(seen_jobs.get(j, {}).get("state")) or None
             if got:
+                # An array with elements still under way has not ended, and runs while any element runs.
                 s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else next(
-                    x for x in got if x != "DONE")  # an array with elements still running has not ended
+                    (x for x in got if x in running_states), next(x for x in got if x != "DONE"))
                 prev = seen_jobs.get(j) or {}
                 entry = {"state": s, "at": iso(ctx.now)}
-                if s in running_states:  # running since first seen so, or since registration if never seen before
-                    entry["run_since"] = prev.get("run_since") or (
-                        iso(ctx.now) if prev else iso(datetime.fromtimestamp(mtime, UTC)))
+                if s in running_states:  # the run clock starts at the first observation of it running
+                    entry["run_since"] = prev.get("run_since") or iso(ctx.now)
                 seen_jobs[j] = entry
             elif last in terminal:
                 s = last  # ended earlier, since dropped from the listing
@@ -845,8 +847,10 @@ def check_decision(ctx):
 def relay_tokens(thread_id, db=None):
     """What a T3 completion relay in the parent quotes of a child: its last UUID (the delegate task id). The relay
     URL-encodes the id once or several times, so a child without a UUID is matched in its plain and encoded forms.
-    A turn started by a t3_thread_send is relayed under that send's task id instead ("...%3Athread-send%3A<uuid>"),
-    the last UUID of the message that started the run, so with `db` the child's recent runs add theirs."""
+    A turn started by a t3_thread_send is relayed under that send's task id instead ("...%3Athread-send%3A<id>"):
+    everything after "thread-send:" in the id of the message that started the run (a UUID or a name such as
+    "ordrev-done-20261105"), so with `db` the child's recent runs add theirs. The sender's own "mcp:<uuid>" before
+    it is shared by many children and never counts."""
     found = UUID_RE.findall(str(thread_id))
     if found:
         tokens = [found[-1].lower()]
@@ -855,9 +859,9 @@ def relay_tokens(thread_id, db=None):
         tokens = [t.lower() for t in (str(thread_id), once, quote(once, safe=""))]
     if db is not None:
         for _req, _start, user_msg in db.execute(Q_RECENT_RUNS, (str(thread_id),)).fetchall():
-            found = UUID_RE.findall(str(user_msg or ""))
-            if found:
-                tokens.append(found[-1].lower())
+            send_id = str(user_msg or "").partition("thread-send:")[2]
+            if send_id:
+                tokens.append("thread-send%3a" + quote(send_id, safe="").lower())
     return list(dict.fromkeys(tokens))
 
 
@@ -951,17 +955,17 @@ def check_child_decisions(ctx, sec, st, after):
             info = ctx.thread(tid)
             if not info or not info[1]:
                 continue  # not a child
-            if kind in ("handoff", "waiting") and mid not in nojob_seen:
+            if kind == "waiting" and mid not in nojob_seen:  # a wait on jobs that no job file lists
                 nojob_seen[mid] = iso(ctx.now)
                 if owners is None:
                     owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
-                named = re.findall(r"\d{4,10}", w.group(1)) if w else []
-                named = list(dict.fromkeys(named + JOB_NAMED_RE.findall(text)))
-                if (tid not in owners and named and not any(j in known for j in named)
-                        and not OWN_WAIT_RE.search(text)):
-                    ctx.note(f"decision: child {short(info[0], 40)} ({tid}) handoff on job {named[0]} without a job"
-                             " file -> wake the child")
-                    ctx.wake(tid, "decision", NOJOB_TEXT.format(watch=Path(__file__).resolve(), job=named[0]),
+                named = list(dict.fromkeys(re.findall(r"\d{4,10}", w.group(1)) + JOB_NAMED_RE.findall(text)))
+                missing = [j for j in named if j not in known]
+                if missing and not OWN_WAIT_RE.search(text):
+                    ctx.note(f"decision: child {short(info[0], 40)} ({tid}) waiting on job {', '.join(missing)}"
+                             " without a job file -> wake the child")
+                    ctx.wake(tid, "decision", NOJOB_TEXT.format(watch=Path(__file__).resolve(),
+                                                                jobs=" ".join(f"--job {j}" for j in missing)),
                              recheck={"kind": "nojob", "child": tid, "message": mid})
             if kind == "waiting":
                 seen[mid] = iso(ctx.now)
@@ -1020,9 +1024,9 @@ def parse_validity(text, now, tz):
 def check_expiry(ctx):
     """A login runs out soon (e.g. `tsh status`, "Valid until"). Off unless configured: `command` prints the
     validity, `pattern` (a regex) captures its end time or the duration left in group 1. Only while a job file is
-    open (`only_with_jobs`, default true): then it wakes the owner threads of the open job files, the ones whose
-    jobs need the login, and runs no command at all otherwise. With `only_with_jobs` false it always checks and
-    wakes the orchestrator (or `thread`). Each recipient is woken once per expiry time when less than
+    open (`only_with_jobs`, default true): then it wakes the owner of the oldest open job file, and runs no command
+    at all otherwise. With `only_with_jobs` false it always checks and wakes the orchestrator (or `thread`). That
+    one thread is woken once per expiry time when less than
     `warn_minutes` (60) are left, or when the pattern no longer matches (logged out). A renewal brings a new expiry
     time, and with it a new wake later. Times within 5 min of the one already reported count as the same login (a
     duration read each run drifts by seconds)."""
@@ -1037,7 +1041,7 @@ def check_expiry(ctx):
         if not oldest:
             ctx.note(f"expiry: {name} not checked, no open job file")
             return
-        targets = [resolve_owner(ctx, oldest)[0]]
+        targets = [resolve_owner(ctx, *oldest)[0]]
     else:
         targets = [sec.get("thread") or ctx.orchestrator]
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 30)))
@@ -1061,17 +1065,16 @@ def check_expiry(ctx):
                                    else "no validity found"))
     if left is not None and left >= warn:
         st.pop("warned", None)
-        st.pop("warned_to", None)
+        st.pop("warned_to", None)  # written by older versions
         return
     warned = st.get("warned")
     same = warned == key or (left is not None and warned not in (None, "unreadable")
                              and abs(parse_iso(warned) - until) <= timedelta(minutes=5))
     if same:  # one warning per expiry, to one thread: a second recipient would start a second login at once
         return
-    told, new = set(), targets
-    st["warned"] = warned if same else key
-    st["warned_to"] = sorted(told | set(new))
-    for t in new:
+    st["warned"] = key
+    st.pop("warned_to", None)
+    for t in targets:
         ctx.wake(t, "expiry", text, urgent=True)
 
 

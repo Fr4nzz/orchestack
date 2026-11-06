@@ -50,13 +50,16 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 7. **Progress is not news.** Children and sub-leads send up only messages that start with `decision:`, `done:`,
    `failed:` or `handoff:`. FYIs and progress go to a notes file (default `.work/orchestrator/NOTES.md` in the
    project) that the lead reads on its next real task. Answer a stray progress note in one line or not at all.
-   A turn that only logs progress ends with `noted: ...`, a long wait with `waiting: <job ids> ...`. Neither wakes anyone.
+   A turn that only logs progress ends with `noted: ...`, a long wait with `waiting: <job ids> ...`. `noted:` /
+   `waiting:` at the START of the message: the watcher never wakes anyone for them. T3's own completion relay of a
+   delegated turn still reaches the parent.
 
 ## Waiting
 
 8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
    the job runs or 30 min pass, see the cluster skill), register the wait with
-   `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..."` (it writes a job file to
+   `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..." --expect-min <expected runtime> --max-pend-h <limit, e.g. 3>`
+   (always supply both: without them the straggler and pending wakes are off. It writes a job file to
    `~/.local/state/orchestack/jobs/`, works from any project, and takes the thread id from `$T3CODE_THREAD_ID`.
    `--parent` is optional, else the watcher uses lineage), write a state file (outputs, next step), and end the turn with `waiting:` plus the job ids. The watcher
    wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the

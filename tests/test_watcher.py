@@ -944,7 +944,7 @@ def test_waiting_without_a_job_file_wakes_only_the_child(tmp_path):
     rig.run(at(45))
     w = rig.wakes()
     assert [x["thread"] for x in w] == [CHILD]
-    assert "watch.py add --job 4101 --next-step" in w[0]["text"]
+    assert "watch.py add --job 4101 --job 4102 --next-step" in w[0]["text"]
     rig.run(at(200))
     assert rig.wakes() == []
     for sub, text, jobs in (("noids", "waiting: on the review chat's answer", None),
@@ -957,27 +957,42 @@ def test_waiting_without_a_job_file_wakes_only_the_child(tmp_path):
         assert rig.wakes() == [], sub
 
 
-def test_handoff_on_a_job_without_a_job_file_wakes_the_child_once(tmp_path):
-    rig, conn = child_result_rig(tmp_path, "handoff: frames are ready. CPU build job 4101 is still running; I'm"
-                                           " waiting on it before I submit the GPU pilot.")
+def test_waiting_on_a_job_without_a_job_file_wakes_the_child_once(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "waiting: frames are ready. CPU build job 4101 is still running and the"
+                                           " watcher will monitor it.")  # lower-case "monitor" is not Monitor
     rig.run(at(45))
-    w = sorted(rig.wakes(), key=lambda x: x["thread"])
-    assert [x["thread"] for x in w] == sorted([CHILD, "orch-1"])  # the parent still gets the unrelayed handoff
-    mine = next(x for x in w if x["thread"] == CHILD)["text"]
-    assert mine.startswith("watcher: decision: Your handoff left no watcher job file, so nothing will wake you.")
-    assert "watch.py add --job 4101 --next-step" in mine and "wait inside one tool call" in mine
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == [CHILD]  # waiting: never wakes the parent
+    assert w[0]["text"].startswith("watcher: decision: Your message left no watcher job file, so nothing will wake")
+    assert "watch.py add --job 4101 --next-step" in w[0]["text"] and "wait inside one tool call" in w[0]["text"]
     rig.run(at(200))
     assert rig.wakes() == []  # once
 
 
-def test_handoff_without_a_named_job_or_with_a_job_file_does_not_wake_the_child(tmp_path):
+def test_handoff_naming_a_job_does_not_wake_the_child(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "handoff: job 4101 finished, need your call")
+    rig.run(at(45))
+    assert [x["thread"] for x in rig.wakes()] == ["orch-1"]  # the parent gets the handoff, the child no nudge
+
+
+def test_partly_registered_wait_wakes_with_exactly_the_missing_jobs(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "waiting: 4101 and 4102 (CPU builds)")
+    own_job_file(rig, ("4101",))  # the child owns an open job file, but 4102 is in none
+    rig.run(at(45))
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == [CHILD]
+    assert "add --job 4102 --next-step" in w[0]["text"] and "4101" not in w[0]["text"]
+
+
+def test_waiting_without_a_named_job_or_with_a_job_file_does_not_wake_the_child(tmp_path):
     cases = {
-        "nojob": "handoff: lane B is underway, nothing trained yet; 8517 tiles built",
-        "file": "handoff: waiting on job 4101",
-        "other": "handoff: waiting on job 4102 (registered by lane B)",
-        "bg": "handoff: job 4105 runs; a background wait restarts me when it ends",
-        "jobfile": "handoff: the job file for 4101 is written",
-        "moved": "handoff: the composite rerun (job 4104) is still running",
+        "nojob": "waiting: lane B is underway, nothing trained yet; 8517 tiles built",
+        "file": "waiting: 4101",
+        "other": "waiting: job 4102 (registered by lane B)",
+        "bg": "waiting: job 4105 runs; a background wait restarts me when it ends",
+        "monitor": "waiting: 4105, a Monitor restarts me when it ends",
+        "jobfile": "waiting: the job file for 4101 is written",
+        "moved": "waiting: the composite rerun (job 4104) is still running",
     }
     for sub, text in cases.items():
         (tmp_path / sub).mkdir()
@@ -992,20 +1007,44 @@ def test_handoff_without_a_named_job_or_with_a_job_file_does_not_wake_the_child(
             (jobs / "done").mkdir()
             (jobs / "done" / "build.json").write_text(json.dumps({"thread": CHILD, "jobs": ["4104"]}))
         rig.run(at(45))
-        assert [w["thread"] for w in rig.wakes() if w["thread"] == CHILD] == [], sub
+        assert rig.wakes() == [], sub
 
 
 def test_nojob_wake_held_is_dropped_once_the_child_moves_on(tmp_path):
-    rig, conn = child_result_rig(tmp_path, "handoff: waiting on job 4101")
+    rig, conn = child_result_rig(tmp_path, "waiting: 4101")
     state = rig.state()
-    state["sent"] = {CHILD: at(40), "orch-1": at(40)}  # both woken recently: the wakes are held
+    state["sent"] = {CHILD: at(40)}  # woken recently: the wake is held
     (rig.state_dir / "watch.json").write_text(json.dumps(state))
     rig.run(at(45))
-    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 2
+    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 1
     add_message(conn, "a3", CHILD, "assistant", "registered the job file", at(50))
     p = rig.run(at(105), "--verbose")
     assert rig.wakes() == [] and rig.state()["outbox"] == []
-    assert p.stdout.count("answered or relayed meanwhile") == 2
+    assert "answered or relayed meanwhile" in p.stdout
+
+
+def test_silenced_handoff_stays_quiet_after_its_job_file_ends(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "handoff: lane A waits on its pilot")
+    own_job_file(rig)
+    rig.run(at(45))
+    assert rig.wakes() == []
+    (rig.state_dir / "jobs" / "pilot.json").unlink()  # the job ended and the file was moved away
+    rig.run(at(120))
+    assert rig.wakes() == []  # the handoff was judged once: no late "not relayed" wake
+
+
+def test_relay_under_a_named_send_id_with_a_shared_sender(tmp_path):
+    shared = fake_uuid(0x66)  # the sender's mcp:<uuid> part is shared by many children
+    for sub, relayed_id, woken in (("same", "ordrev-done-20261105", 0), ("other", "ordrev-other", 1)):
+        (tmp_path / sub).mkdir()
+        rig, conn = child_result_rig(tmp_path / sub)
+        conn.execute("DELETE FROM orchestration_v2_projection_messages WHERE message_id = 'u1'")
+        started_by(conn, CHILD, 1, f"message:mcp:{shared}:thread-send:ordrev-done-20261105", sender="orch-1")
+        add_message(conn, "p1", "orch-1", "user",
+                    f"Delegated task node:delegated-task:command%3Amcp%3A{shared}%3Athread-send%3A{relayed_id}"
+                    " (Other child) [completed]:\ndone: something else", at(11))
+        rig.run(at(60))
+        assert len(rig.wakes()) == woken, sub
 
 
 # ---------- disk ----------
@@ -1692,20 +1731,22 @@ def test_jobs_pending_past_the_limit_wakes_once(tmp_path):
 
 
 def test_jobs_owner_gone_wakes_its_parent_once_and_takes_its_wakes(tmp_path):
-    for sub, setup in (("missing", "file-parent"), ("deleted", "lineage")):
+    for sub, setup in (("deleted-file-parent", "file-parent"), ("deleted", "lineage")):
         (tmp_path / sub).mkdir()
         rig, listing = limits_rig(tmp_path / sub, "RUN")
         conn = make_db(tmp_path / sub / "state.sqlite")
         add_thread(conn, "orch-1", "Orchestrator")
         add_thread(conn, "lead-1", "Lead: wings", parent="orch-1")
         f = rig.state_dir / "jobs" / "ev.json"
-        if setup == "file-parent":  # the thread vanished: only the job file names the parent
+        if setup == "file-parent":  # the job file names the parent, the lineage does not
             f.write_text(json.dumps({"thread": "child-7", "jobs": ["101"], "parent": "lead-1"}))
-        else:  # deleted: the lineage still names the parent
+            add_thread(conn, "child-7", "Worker")
+        else:  # the lineage names the parent
             add_thread(conn, "child-7", "Worker", parent="lead-1")
-            conn.execute("UPDATE orchestration_v2_projection_threads SET deleted_at = ? WHERE thread_id = 'child-7'",
-                         (T0,))
-            conn.commit()
+        # deleted in T3
+        conn.execute("UPDATE orchestration_v2_projection_threads SET deleted_at = ? WHERE thread_id = 'child-7'",
+                     (T0,))
+        conn.commit()
         cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
         rig.config(jobs=cfg["jobs"], t3_db=str(tmp_path / sub / "state.sqlite"))
         rig.run(T0)  # baseline
@@ -1722,9 +1763,44 @@ def test_jobs_owner_gone_wakes_its_parent_once_and_takes_its_wakes(tmp_path):
     (tmp_path / "live").mkdir()
     rig, listing = limits_rig(tmp_path / "live", "RUN")
     conn = make_db(tmp_path / "live" / "state.sqlite")
-    add_thread(conn, "child-7", "Worker")
+    add_thread(conn, "other", "No row for child-7: it may live in another T3 database")
     cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
     rig.config(jobs=cfg["jobs"], t3_db=str(tmp_path / "live" / "state.sqlite"))
     rig.run(T0)
     rig.run(at(15))
-    assert rig.wakes() == []  # the owner exists: nothing to say while the job runs
+    assert rig.wakes() == []  # not known to be gone: nothing to say while the job runs
+
+
+def test_jobs_run_clock_starts_at_the_first_run_seen_and_arrays_run_if_any_element_runs(tmp_path):
+    rig, listing = limits_rig(tmp_path, "RUN", expect_min=20)
+    listing.write_text("999 RUN\n")  # registered at T0, not listed yet
+    rig.run(T0)
+    listing.write_text("101 RUN\n")
+    rig.run(at(25))  # first seen running
+    rig.run(at(60))
+    assert rig.wakes() == []  # 35 min since it was seen running: not backdated to the file's time
+    rig.run(at(66))
+    assert len(rig.wakes()) == 1
+    (tmp_path / "b").mkdir()
+    rig, listing = limits_rig(tmp_path / "b", "RUN", max_pend_h=1)
+    listing.write_text("101[1] PEND\n101[2] RUN\n")
+    rig.run(T0)
+    rig.run(at(200))
+    assert rig.wakes() == []  # a mixed array runs: no pending wake
+
+
+def test_expiry_goes_to_the_file_parent_when_the_oldest_owner_is_deleted(tmp_path):
+    rig = Rig(tmp_path)
+    conn = make_db(tmp_path / "state.sqlite")
+    add_thread(conn, "lead-1", "Lead")
+    add_thread(conn, "child-7", "Worker")
+    conn.execute("UPDATE orchestration_v2_projection_threads SET deleted_at = ? WHERE thread_id = 'child-7'", (T0,))
+    conn.commit()
+    shared = rig.state_dir / "jobs"
+    shared.mkdir(parents=True)
+    (shared / "a.json").write_text(json.dumps({"thread": "child-7", "jobs": ["101"], "parent": "lead-1"}))
+    rig.config(t3_db=str(tmp_path / "state.sqlite"),
+               expiry={"command": rig.script("s.py", "print('Not logged in.')\n"), "name": "tsh",
+                       "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
+    rig.run(T0)
+    assert [x["thread"] for x in rig.wakes()] == ["lead-1"]
