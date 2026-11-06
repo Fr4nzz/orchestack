@@ -853,6 +853,161 @@ def test_child_result_kinds_start_with_a_baseline(tmp_path):
     assert len(rig2.wakes()) == 1
 
 
+SEND_UUID = fake_uuid(0xdd)  # a t3_thread_send task: T3 relays the turn it started under this id
+
+
+def started_by(conn, tid, ordinal, user_msg, sender=None, created=None):
+    """Make run `ordinal` of `tid` start from message `user_msg`, sent by `sender` (None: the user or the CLI)."""
+    run = f"run:{tid}:{ordinal}"
+    payload = json.loads(conn.execute("SELECT payload_json FROM orchestration_v2_projection_runs WHERE run_id = ?",
+                                      (run,)).fetchone()[0])
+    payload["userMessageId"] = user_msg
+    conn.execute("UPDATE orchestration_v2_projection_runs SET payload_json = ? WHERE run_id = ?",
+                 (json.dumps(payload), run))
+    start = payload["startedAt"]
+    body = {"text": "start", **({"senderThreadId": sender} if sender else {})}
+    conn.execute("INSERT OR REPLACE INTO orchestration_v2_projection_messages VALUES (?, ?, 'user', 0, ?, ?, ?)",
+                 (user_msg, tid, created or start, created or start, json.dumps(body)))
+    conn.commit()
+
+
+def test_child_result_relayed_under_a_thread_send_task_id_is_quiet(tmp_path):
+    for sub, uuid, woken in (("same", SEND_UUID, 0), ("other", fake_uuid(0xee), 1)):
+        (tmp_path / sub).mkdir()
+        rig, conn = child_result_rig(tmp_path / sub)
+        conn.execute("DELETE FROM orchestration_v2_projection_messages WHERE message_id = 'u1'")
+        started_by(conn, CHILD, 1, f"message:mcp:{fake_uuid(0x11)}:thread-send:{SEND_UUID}", sender="orch-1")
+        add_message(conn, "p1", "orch-1", "user",
+                    f"Delegated task node:delegated-task:command%3Amcp%3A{fake_uuid(0x11)}%3Athread-send%3A{uuid}"
+                    " (Retrain stage) [completed]:\ndone: s05 trained", at(11))
+        rig.run(at(60))
+        assert len(rig.wakes()) == woken, sub  # a relay of some other send is not this turn's relay
+
+
+def test_noted_never_wakes(tmp_path):
+    for i, text in enumerate(("noted: lane A at epoch 30, lane B waiting on job 4101",
+                              "**noted:** lanes progressing\nhandoff: later",
+                              "Noted: nothing to report")):
+        (tmp_path / str(i)).mkdir()
+        rig, conn = child_result_rig(tmp_path / str(i), text)
+        rig.run(at(45))
+        rig.run(at(200))
+        assert rig.wakes() == [], text
+
+
+def lead_rig(tmp_path, text="handoff: lane A is waiting on its GPU pilot"):
+    """A lead (CHILD) whose turn was started by a send from its own lane."""
+    rig, conn = child_result_rig(tmp_path, text)
+    add_thread(conn, "lane-a", "Lane A", parent=CHILD, updated=at(10))
+    add_thread(conn, "sibling", "Other child", parent="orch-1", updated=at(10))
+    conn.execute("DELETE FROM orchestration_v2_projection_messages WHERE message_id = 'u1'")
+    return rig, conn
+
+
+def own_job_file(rig, jobs=("4103",), thread=CHILD):
+    d = rig.state_dir / "jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "pilot.json").write_text(json.dumps({"thread": thread, "jobs": list(jobs)}))
+
+
+def test_waiting_and_a_handoff_with_an_open_job_file_do_not_wake_the_parent(tmp_path):
+    for sub, text in (("waiting", "waiting: 4103 (GPU pilot), state in .work/s05/STATE.md"),
+                      ("bold", "**waiting:** 4103"),
+                      ("handoff", "handoff: lane A is waiting on its GPU pilot (job 4103)")):
+        (tmp_path / sub).mkdir()
+        rig, conn = lead_rig(tmp_path / sub, text)
+        started_by(conn, CHILD, 1, "u-cli")  # a watcher jobs wake or the CLI
+        own_job_file(rig)
+        rig.run(at(45))
+        rig.run(at(200))
+        assert rig.wakes() == [], sub  # the jobs wake restarts the child
+
+
+def test_real_handoffs_and_reports_still_wake_the_parent(tmp_path):
+    for sub, sender, text, jobfile in (
+            ("lane", "lane-a", "handoff: lane A's model is ready for the review chat", False),  # no job file
+            ("sib", "sibling", "handoff: lane A is waiting", False),
+            ("done", "lane-a", "done: both lanes finished", True),  # only handoff is softened by a job file
+            ("decision", None, "decision: submit the second seed?", True)):
+        (tmp_path / sub).mkdir()
+        rig, conn = lead_rig(tmp_path / sub, text)
+        started_by(conn, CHILD, 1, f"u-{sub}", sender=sender)
+        if jobfile:
+            own_job_file(rig)
+        rig.run(at(45))
+        w = rig.wakes()
+        assert len(w) == 1 and w[0]["thread"] == "orch-1", sub
+
+
+def test_waiting_without_a_job_file_wakes_only_the_child(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "waiting: 4101 and 4102 (CPU builds), then the GPU pilot")
+    rig.run(at(45))
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == [CHILD]
+    assert "watch.py add --job 4101 --next-step" in w[0]["text"]
+    rig.run(at(200))
+    assert rig.wakes() == []
+    for sub, text, jobs in (("noids", "waiting: on the review chat's answer", None),
+                            ("file", "waiting: 4101", ("4101",))):
+        (tmp_path / sub).mkdir()
+        rig, conn = child_result_rig(tmp_path / sub, text)
+        if jobs:
+            own_job_file(rig, jobs)
+        rig.run(at(45))
+        assert rig.wakes() == [], sub
+
+
+def test_handoff_on_a_job_without_a_job_file_wakes_the_child_once(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "handoff: frames are ready. CPU build job 4101 is still running; I'm"
+                                           " waiting on it before I submit the GPU pilot.")
+    rig.run(at(45))
+    w = sorted(rig.wakes(), key=lambda x: x["thread"])
+    assert [x["thread"] for x in w] == sorted([CHILD, "orch-1"])  # the parent still gets the unrelayed handoff
+    mine = next(x for x in w if x["thread"] == CHILD)["text"]
+    assert mine.startswith("watcher: decision: Your handoff left no watcher job file, so nothing will wake you.")
+    assert "watch.py add --job 4101 --next-step" in mine and "wait inside one tool call" in mine
+    rig.run(at(200))
+    assert rig.wakes() == []  # once
+
+
+def test_handoff_without_a_named_job_or_with_a_job_file_does_not_wake_the_child(tmp_path):
+    cases = {
+        "nojob": "handoff: lane B is underway, nothing trained yet; 8517 tiles built",
+        "file": "handoff: waiting on job 4101",
+        "other": "handoff: waiting on job 4102 (registered by lane B)",
+        "bg": "handoff: job 4105 runs; a background wait restarts me when it ends",
+        "jobfile": "handoff: the job file for 4101 is written",
+        "moved": "handoff: the composite rerun (job 4104) is still running",
+    }
+    for sub, text in cases.items():
+        (tmp_path / sub).mkdir()
+        rig, conn = child_result_rig(tmp_path / sub, text)
+        jobs = rig.state_dir / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        if sub == "file":
+            (jobs / "build.json").write_text(json.dumps({"thread": CHILD, "jobs": ["4101"]}))
+        if sub == "other":
+            (jobs / "lane-b.json").write_text(json.dumps({"thread": "lane-b", "jobs": ["4102"]}))
+        if sub == "moved":  # registered, ended and moved to done/ since
+            (jobs / "done").mkdir()
+            (jobs / "done" / "build.json").write_text(json.dumps({"thread": CHILD, "jobs": ["4104"]}))
+        rig.run(at(45))
+        assert [w["thread"] for w in rig.wakes() if w["thread"] == CHILD] == [], sub
+
+
+def test_nojob_wake_held_is_dropped_once_the_child_moves_on(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "handoff: waiting on job 4101")
+    state = rig.state()
+    state["sent"] = {CHILD: at(40), "orch-1": at(40)}  # both woken recently: the wakes are held
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    rig.run(at(45))
+    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 2
+    add_message(conn, "a3", CHILD, "assistant", "registered the job file", at(50))
+    p = rig.run(at(105), "--verbose")
+    assert rig.wakes() == [] and rig.state()["outbox"] == []
+    assert p.stdout.count("answered or relayed meanwhile") == 2
+
+
 # ---------- disk ----------
 
 def test_disk_low_wakes_immediately_once_and_rearms(tmp_path):

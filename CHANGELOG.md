@@ -23,6 +23,16 @@
   The subject may also come first when bold, dash-separated or a code-like token (`cls-freeze handoff: ...`,
   `**Retrain stage** - done:`). Free prose before the word (`Download done: now training`) and negations
   (`not yet done:`) stay progress, so they cannot silence the real report.
+- Watcher `decision`: a T3 relay of a turn that a `t3_thread_send` started (`...%3Athread-send%3A<uuid> [completed]`)
+  counts as delivered: the watcher matches the task ids of the messages that started the child's recent runs, not
+  only the delegate task id (a false "not relayed" wake on 5 Nov).
+- Watcher `decision`, rule for progress endings: `noted:` (a progress-only turn) and `waiting: <job ids>` (a long
+  wait) never wake the parent. A `handoff:` from a child that owns an open job file is the old ending of a long wait
+  and stays quiet too (the jobs wake restarts the child). Every other unrelayed `handoff:` still wakes the parent,
+  whoever started the turn. The orchestrator skill's rules 7 and 8 now end long waits with `waiting:`.
+- Watcher `decision`: a child whose last message is a `waiting:` or `handoff:` naming a cluster job (`waiting: <ids>`,
+  `job 4101`, `Job <4101>`) that no job file lists (open, ended or moved to `done/`, any owner) is woken itself,
+  once, and told to register the wait with `watch.py add`. A message naming no job, or a background wait, stays quiet.
 - Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
   `warn_minutes` left, or no longer matches the pattern, wakes the orchestrator once.
 - Watcher `expiry` runs only while a job file is open and wakes the owners of those files instead of the

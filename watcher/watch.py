@@ -14,7 +14,8 @@ owns it. The same state never wakes anyone twice.
             (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
-            thread send from the child there) for 30 min -> its parent
+            thread send from the child there) for 30 min -> its parent (noted:/waiting: never, nor a handoff: while
+            the child owns an open job file); a waiting:/handoff: naming a job no job file lists -> the child, once
   expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owners
             of the open job files (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
@@ -66,6 +67,18 @@ SENT_REPORT_RE = re.compile(
     r"(?:\*\*[^*:\n]{1,60}\*\*\s*(?:[-\u2013\u2014]\s*)?|[^*:\n]{1,60}?\s[-\u2013\u2014]\s+|[\w.]*[-\d][\w.-]*\s+)?"
     r"[*_>`\s]*(?<![A-Za-z])(decision|done|failed|handoff)[*_`]*\s*"
     r"(\([^)\n]{1,60}\)|[-\u2013\u2014]\s*[^:\n]{1,40})?[*_`]*\s*:", re.I)
+# A handoff that names a cluster job by number: "job 4101", "jobs 4101 and ...", "job id 4101", "Job <4101>",
+# "jobid=4101". The word "job" must come right before the number, so "4101 tiles" or "job file" never count.
+JOB_NAMED_RE = re.compile(r"(?<![A-Za-z])job(?:s|\s*ids?|ids?)?\s*(?:#|<|=|:|no\.?)?\s*(\d{4,10})(?!\d)", re.I)
+# A handoff that says the child waits some other way (a background command or monitor that restarts it).
+OWN_WAIT_RE = re.compile(r"background (?:wait|task|command|job|watch)|t3_background_wait|\bMonitor\b", re.I)
+NOJOB_TEXT = ("Your handoff left no watcher job file, so nothing will wake you. Register the wait with"
+              " `python3 {watch} add --job {job} --next-step \"...\"` and check the file exists, or wait inside one"
+              " tool call.")
+# A child's progress endings, which wake no parent: "noted:" (progress only) and "waiting:" (a long wait, followed by
+# the job ids: "waiting: 4101, 4102 (GPU pilot)").
+WAITING_RE = re.compile(r"^\s*[*_>]*\s*waiting[*_]*\s*:[*_]*\s*((?:\d{4,10}(?:\[[^\]\n]*\])?(?:\s*(?:,|;|&|and)?\s*))*)",
+                        re.I)
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
@@ -133,8 +146,8 @@ Q_SENT_BY = (
     " AND json_extract(payload_json, '$.senderThreadId') = ? ORDER BY created_at DESC LIMIT 50"
 )
 Q_RECENT_RUNS = (
-    "SELECT requested_at, json_extract(payload_json, '$.startedAt') FROM orchestration_v2_projection_runs"
-    " WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 10"
+    "SELECT requested_at, json_extract(payload_json, '$.startedAt'), json_extract(payload_json, '$.userMessageId')"
+    " FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 10"
 )
 
 # Each check's queries with sample parameters. Before a check runs, EXPLAIN QUERY PLAN must show no scan of a big
@@ -748,23 +761,49 @@ def check_decision(ctx):
     ctx.note("decision: checked" + (" (baseline, recorded without waking)" if baseline else ""))
 
 
-def relay_tokens(thread_id):
+def relay_tokens(thread_id, db=None):
     """What a T3 completion relay in the parent quotes of a child: its last UUID (the delegate task id). The relay
-    URL-encodes the id once or several times, so a child without a UUID is matched in its plain and encoded forms."""
+    URL-encodes the id once or several times, so a child without a UUID is matched in its plain and encoded forms.
+    A turn started by a t3_thread_send is relayed under that send's task id instead ("...%3Athread-send%3A<uuid>"),
+    the last UUID of the message that started the run, so with `db` the child's recent runs add theirs."""
     found = UUID_RE.findall(str(thread_id))
     if found:
-        return [found[-1].lower()]
-    once = quote(str(thread_id), safe="")
-    return list(dict.fromkeys(t.lower() for t in (str(thread_id), once, quote(once, safe=""))))
+        tokens = [found[-1].lower()]
+    else:
+        once = quote(str(thread_id), safe="")
+        tokens = [t.lower() for t in (str(thread_id), once, quote(once, safe=""))]
+    if db is not None:
+        for _req, _start, user_msg in db.execute(Q_RECENT_RUNS, (str(thread_id),)).fetchall():
+            found = UUID_RE.findall(str(user_msg or ""))
+            if found:
+                tokens.append(found[-1].lower())
+    return list(dict.fromkeys(tokens))
 
 
 def turn_start(db, child, created):
     """When the child's turn that wrote a message at `created` started: the latest run started by then."""
-    for requested, started in db.execute(Q_RECENT_RUNS, (child,)).fetchall():
+    for requested, started, _user_msg in db.execute(Q_RECENT_RUNS, (child,)).fetchall():
         start = started or requested
         if start and start <= created:
             return start
     return created
+
+
+def all_job_ids(ctx):
+    """Every job id named in any readable job file, open or ended (also the done/ folder next to each job directory),
+    whoever owns it."""
+    files = job_files(ctx)
+    sec = ctx.section("jobs")
+    dirs = {p / ".work" / "orchestrator" / "jobs" for p in projects(ctx)} | {shared_jobs_dir()}
+    dirs |= {Path(os.path.expanduser(d)) for d in sec.get("dirs") or []} | {f.parent for f in files}
+    files += [f for d in sorted(dirs) if (d / "done").is_dir() for f in sorted((d / "done").glob("*.json"))]
+    ids = set()
+    for f in files:
+        try:
+            ids.update(read_job_file(f)[1])
+        except Exception:
+            continue
+    return ids
 
 
 def child_decision_relayed(db, parent, child, created, since=None):
@@ -777,13 +816,15 @@ def child_decision_relayed(db, parent, child, created, since=None):
     for at, text in db.execute(Q_SENT_BY, (parent, since, str(child))).fetchall():
         if (at or "") >= created or SENT_REPORT_RE.match(text or ""):
             return True
-    return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child))
+    return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child, db))
 
 
 def child_decision_open(db, item):
     """A held child-decision wake is still due: the decision is still the child's last message and no relay came."""
     r = item["recheck"]
     row = db.execute(Q_LATEST_MESSAGE, (r["child"],)).fetchone()
+    if r.get("kind") == "nojob":  # the child's own no-job-file wake: due while that handoff is still its last word
+        return bool(row) and row[0] == r["message"]
     return bool(row) and row[0] == r["message"] and not child_decision_relayed(db, r["parent"], r["child"],
                                                                                 r["created"],
                                                                                 r.get("since") or turn_start(
@@ -804,6 +845,9 @@ def check_child_decisions(ctx, sec, st, after):
     st["child_results"] = True
     seen = st.setdefault("child_seen", {})
     prune(seen, ctx.now)
+    nojob_seen = st.setdefault("nojob_seen", {})
+    prune(nojob_seen, ctx.now)
+    owners = known = None  # read on first need: open job owners, and every job id in any job file
     since = iso(ctx.now - timedelta(hours=float(sec.get("child_lookback_hours", 48))))
     for (pid,) in db.execute(Q_PROJECTS).fetchall():
         for (tid,) in db.execute(Q_RECENT_THREADS, (pid, since)).fetchall():
@@ -813,9 +857,10 @@ def check_child_decisions(ctx, sec, st, after):
             mid, role, streaming, created, text = row
             text = text or ""
             m = RESULT_RE.match(text)
-            if mid in seen or role != "assistant" or streaming or created < since or not m:
+            w = None if m else WAITING_RE.match(text)
+            if mid in seen or role != "assistant" or streaming or created < since or not (m or w):
                 continue
-            kind = m.group(1).lower()
+            kind = m.group(1).lower() if m else "waiting"
             if baseline or (results_baseline and kind != "decision"):  # every open one, of any age, is handled
                 seen[mid] = iso(ctx.now)
                 continue
@@ -823,8 +868,25 @@ def check_child_decisions(ctx, sec, st, after):
             if age < after or db.execute(Q_BUSY, (tid,)).fetchone():
                 continue
             info = ctx.thread(tid)
-            if not info or not info[1] or not ctx.thread(info[1]):
-                continue  # not a child, or its parent is gone: nobody to wake
+            if not info or not info[1]:
+                continue  # not a child
+            if kind in ("handoff", "waiting") and mid not in nojob_seen:
+                nojob_seen[mid] = iso(ctx.now)
+                if owners is None:
+                    owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
+                named = re.findall(r"\d{4,10}", w.group(1)) if w else []
+                named = list(dict.fromkeys(named + JOB_NAMED_RE.findall(text)))
+                if (tid not in owners and named and not any(j in known for j in named)
+                        and not OWN_WAIT_RE.search(text)):
+                    ctx.note(f"decision: child {short(info[0], 40)} ({tid}) handoff on job {named[0]} without a job"
+                             " file -> wake the child")
+                    ctx.wake(tid, "decision", NOJOB_TEXT.format(watch=Path(__file__).resolve(), job=named[0]),
+                             recheck={"kind": "nojob", "child": tid, "message": mid})
+            if kind == "waiting":
+                seen[mid] = iso(ctx.now)
+                continue  # a long wait is progress: the parent is not woken
+            if not ctx.thread(info[1]):
+                continue  # its parent is gone: nobody to wake
             title, parent = info
             if db.execute(Q_BUSY, (parent,)).fetchone():
                 continue  # not marked seen: T3 may write the relay when the parent's turn ends
@@ -832,6 +894,15 @@ def check_child_decisions(ctx, sec, st, after):
             turn = turn_start(db, tid, created)
             if child_decision_relayed(db, parent, tid, created, turn):
                 continue
+            if kind == "handoff":
+                # A handoff from a child that owns an open job file is the old ending of a long wait (now
+                # "waiting:"): the jobs wake restarts the child, so the parent is not woken. Others still wake it.
+                if owners is None:
+                    owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
+                if tid in owners:
+                    ctx.note(f"decision: child {short(title, 40)} ({tid}) handoff with an open job file, parent"
+                             " not woken")
+                    continue
             snippet = short(text.strip(), 90)
             what = "a decision" if kind == "decision" else f"a {kind}: report"
             ctx.note(f"decision: child {short(title, 40)} ({tid}) {kind} not relayed -> wake {parent}")
