@@ -50,13 +50,18 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 7. **Progress is not news.** Children and sub-leads send up only messages that start with `decision:`, `done:`,
    `failed:` or `handoff:`. FYIs and progress go to a notes file (default `.work/orchestrator/NOTES.md` in the
    project) that the lead reads on its next real task. Answer a stray progress note in one line or not at all.
-   A turn that only logs progress ends with `noted: ...`, a long wait with `waiting: <job ids> ...`. `noted:` /
-   `waiting:` at the START of the message: the watcher never wakes anyone for them. T3's own completion relay of a
-   delegated turn still reaches the parent.
+   A turn that only logs progress ends with `noted: ...`, a long wait with `waiting: <job ids> ...`. Both are turn
+   endings, never sends: don't `t3_thread_send` them. The watcher never wakes anyone for them, but **T3 relays
+   every turn end of an async delegate to its parent, whatever it says** (no setting turns this off). So the
+   only way to wake the parent less is to end fewer turns: wait inside a turn (rule 9) or through the watcher
+   (rule 8). A report is either sent or the turn ends with it, never both: a turn the parent or a delegate task
+   started ends with it (T3 relays it). A turn the watcher started sends it (T3 does not relay those).
+   Don't send FYIs or notes to a running child: each one starts a child turn whose end is relayed back to you.
+   Put them in its state or notes file and send only what changes its current step.
 
 ## Waiting
 
-8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
+8. **Long waits (over about 45 min, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
    the job runs or about 20 min pass, see the cluster skill), register the wait with
    `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..." --expect-min <expected runtime> --max-pend-h <limit, e.g. 3>`
    (always supply both: without them the straggler and pending wakes are off. It writes a job file to
@@ -65,12 +70,18 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
    wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the
    projected finish instead. At the wake, a fresh worker (or the child) reads the state file, moves the job file
    to the `done/` folder next to it and reports `done:` or `failed:`. A child woken by the watcher sends that report to its parent
-   with `t3_thread_send` (mode "queue"), because the end of a turn the watcher started does not notify the parent. A background wait that times out after 2 h returns to an expired cache and costs more.
-9. **Short waits (under about 1 h): wait inside one tool call, without ending the turn,** because a child's turn
-   end wakes its parent whatever it says. Claude: one background command or Monitor that exits when every job has
-   ended or one has failed, then `t3_background_wait`. Codex: one foreground command that blocks until the jobs end
-   (a scheduler wait command, or one until-loop within the tool timeout). Delegates: `t3_thread_wait`. Never a
-   series of `sleep` tool calls.
+   with `t3_thread_send` (mode "queue"), because the end of a turn the watcher started does not notify the parent.
+   Send only a final `done:`/`failed:`/`decision:`. If the jobs are still running, re-register them and end with
+   `waiting:` without sending anything. A background wait that times out after 2 h returns to an expired cache and costs more.
+9. **Short waits (under about 45 min): one wait, one turn end at most,** because every child turn end wakes its
+   parent whatever it says. Under 10 min: one foreground command that blocks until the jobs end (Claude allows
+   up to 600,000 ms). 10 to 45 min: ONE background command with an explicit Bash `timeout` above its loop cap
+   (the default slot is 30 min, the maximum 7,200,000 ms), then `t3_background_wait` on it. `t3_background_wait`
+   does not block: it only holds the turn-end relay until that command ends, so the parent gets one wake, not
+   two. Never re-arm short loops: each re-arm is another relay (one child woke its orchestrator 12 times
+   overnight this way). Over 45 min: rule 8, never a background loop. Codex: one foreground command within the
+   tool timeout. Waiting on your own delegates or critics: `t3_thread_wait` inside the same turn. Never a series
+   of `sleep` tool calls.
 10. **Use the orchestack watcher instead of AI scheduled checks.** It runs every 15 min without a model and wakes a
     chat only when something changed: jobs ended or failed, a child failed, waits on an approval or is stuck, disk
     is low, the weekly reset came or usage is far behind pace, a `decision:` sat unanswered. No recurring AI
@@ -109,14 +120,20 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 ## Briefs
 
 18. **Keep briefs short.** Quote the user's words for the goal, list the explicit asks as a done-check the child runs
-    before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy:
+    before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy
+    the block below word for word into every brief, and check it is there before dispatch. A brief that leaves it
+    out or changes its wait or report lines (for example "background waits as a shell loop", or "send `waiting:`
+    up") is a bug that costs parent wakes:
 
     > Command safety: absolute paths, no `cd` in compound commands, no `rm` of globs, variables or relative paths,
     > fresh timestamped output folders, no `git commit -a`, `git reset --hard`, `git clean` or force pushes. If a
-    > command raises an approval prompt, rewrite it into the safe form rather than wait. Short waits: inside one
-    > tool call. Waits over about 1 h: a job file for the watcher plus a state file, end with `waiting: <job ids>`. Send up only
-    > `decision:`, `done:`, `failed:` or `handoff:`. End your turn only with the result, a failure or a real
-    > question.
+    > command raises an approval prompt, rewrite it into the safe form rather than wait. Every turn you end wakes
+    > your parent. Waits under 45 min: one foreground command, or one background command with an explicit timeout
+    > plus `t3_background_wait`, never re-armed. Longer: `watch.py add` (with `--expect-min` and `--max-pend-h`),
+    > a state file, then end once with `waiting: <job ids>`. Never send `waiting:` or `noted:`. Send up only a final
+    > `decision:`, `done:`, `failed:` or `handoff:`, and only from a turn the watcher started; otherwise end the
+    > turn with it. Wait on your own delegates with `t3_thread_wait`. End your turn only with the result, a
+    > failure or a real question.
 
     Never rewrite a command to get around a real permission check.
 
