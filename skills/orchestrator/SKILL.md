@@ -137,13 +137,15 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     > Command safety: absolute paths, no `cd` in compound commands, no `rm` of globs, variables or relative paths,
     > fresh timestamped output folders, no `git commit -a`, `git reset --hard`, `git clean` or force pushes. If a
     > command raises an approval prompt, rewrite it into the safe form rather than wait. Every turn you end wakes
-    > your parent. Waits under 10 min: one foreground command (Bash `timeout` 600000). 10 to 45 min: one background
-    > command (Bash `timeout` at least the loop cap + 180 s) plus `t3_background_wait`, never re-armed. Longer, or
-    > if that loop runs out: `watch.py add` (with `--expect-min` and `--max-pend-h`), a state file, then end once
-    > with `waiting: <job ids>`. Never send `waiting:` or `noted:`. To your parent, send only a final `decision:`,
-    > `done:`, `failed:` or `handoff:`, and only from a turn the watcher started; otherwise end the turn with it.
-    > Wait on your own delegates with `t3_thread_wait`. End your turn only with the result, a failure, a real
-    > question or the `waiting:` handoff above.
+    > your parent. Waits under 10 min: one foreground command (Bash `timeout` 600000, loop `CAP=420 PEND_S=300`).
+    > 10 to 45 min: one background command (Bash `timeout` at least the loop cap + 180 s) plus
+    > `t3_background_wait`, never re-armed: end that turn with one short line, and report in the turn its completion
+    > starts. Longer, or if that loop runs out: `watch.py add` (with `--expect-min` and `--max-pend-h`), a state
+    > file, then end once with `waiting: <job ids>`. Never send `waiting:` or `noted:`. To your parent, report only a
+    > final `decision:`, `done:`, `failed:` or `handoff:`: send it from a turn the watcher or a scheduled wake started
+    > (or always, if you were launched rather than delegated), otherwise end the turn with it. Wait on your own
+    > delegates with `t3_thread_wait`. End your turn only with the result, a failure, a real question, the
+    > `waiting:` handoff, or the short line of a background wait.
 
     Never rewrite a command to get around a real permission check.
 
