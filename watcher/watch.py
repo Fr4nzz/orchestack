@@ -80,6 +80,7 @@ NOJOB_TEXT = ("Your message left no watcher job file, so nothing will wake you. 
 # the job ids: "waiting: 4101, 4102 (GPU pilot)").
 WAITING_RE = re.compile(r"^\s*[*_>]*\s*waiting[*_]*\s*:[*_]*\s*((?:\d{4,10}(?:\[[^\]\n]*\])?(?:\s*(?:,|;|&|and)?\s*))*)",
                         re.I)
+WAIT_ID_RE = re.compile(r"\d{4,10}(?:\[[^\]\n]*\])?")  # one job id in a waiting: list, array index part included
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
@@ -959,8 +960,11 @@ def check_child_decisions(ctx, sec, st, after):
                 nojob_seen[mid] = iso(ctx.now)
                 if owners is None:
                     owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
-                named = list(dict.fromkeys(re.findall(r"\d{4,10}", w.group(1)) + JOB_NAMED_RE.findall(text)))
-                missing = [j for j in named if j not in known]
+                # Only the ids listed after "waiting:" are waited on (full array element ids kept, so a range
+                # "4101[1000-2000]" is one id). Without a list, "job <id>" in the text counts. A registered base id
+                # covers its elements, as in the jobs check, and an element id covers itself.
+                named = list(dict.fromkeys(WAIT_ID_RE.findall(w.group(1)) or JOB_NAMED_RE.findall(text)))
+                missing = [j for j in named if j not in known and j.split("[")[0] not in known]
                 if missing and not OWN_WAIT_RE.search(text):
                     ctx.note(f"decision: child {short(info[0], 40)} ({tid}) waiting on job {', '.join(missing)}"
                              " without a job file -> wake the child")

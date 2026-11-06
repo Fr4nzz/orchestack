@@ -1804,3 +1804,39 @@ def test_expiry_goes_to_the_file_parent_when_the_oldest_owner_is_deleted(tmp_pat
                        "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})"})
     rig.run(T0)
     assert [x["thread"] for x in rig.wakes()] == ["lead-1"]
+
+
+def test_waiting_keeps_array_element_ids_and_their_coverage(tmp_path):
+    for sub, text, registered, expect in (
+            ("element", "waiting: 4101[1]", ["4101[1]"], None),  # an element covers itself
+            ("base", "waiting: 4101[3], 4102", ["4101"], None),  # a base id covers its elements (4102 registered too)
+            ("other-element", "waiting: 4101[2]", ["4101[1]"], "--job 4101[2] --next-step")):
+        (tmp_path / sub).mkdir()
+        rig, conn = child_result_rig(tmp_path / sub, text)
+        own_job_file(rig, registered + (["4102"] if sub == "base" else []))
+        rig.run(at(45))
+        w = rig.wakes()
+        if expect is None:
+            assert w == [], sub
+        else:
+            assert [x["thread"] for x in w] == [CHILD] and expect in w[0]["text"], sub
+
+
+def test_only_the_waiting_list_counts_as_waited_on(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "waiting: 4101 (resubmit of failed job 4099, killed on the bad host)")
+    own_job_file(rig, ("4101",))
+    rig.run(at(45))
+    assert rig.wakes() == []  # 4099 is named, but not waited on
+
+
+def test_waiting_array_range_is_one_id(tmp_path):
+    rig, conn = child_result_rig(tmp_path, "waiting: 4101[1000-2000]")
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and "add --job 4101[1000-2000] --next-step" in w[0]["text"]
+    assert "--job 1000" not in w[0]["text"] and "--job 2000" not in w[0]["text"]
+    (tmp_path / "b").mkdir()
+    rig, conn = child_result_rig(tmp_path / "b", "waiting: 4101[1000-2000]")
+    own_job_file(rig, ("4101",))
+    rig.run(at(45))
+    assert rig.wakes() == []  # the base id covers the range

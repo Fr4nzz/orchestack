@@ -57,7 +57,7 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 ## Waiting
 
 8. **Long waits (over about 1 h, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
-   the job runs or 30 min pass, see the cluster skill), register the wait with
+   the job runs or about 20 min pass, see the cluster skill), register the wait with
    `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..." --expect-min <expected runtime> --max-pend-h <limit, e.g. 3>`
    (always supply both: without them the straggler and pending wakes are off. It writes a job file to
    `~/.local/state/orchestack/jobs/`, works from any project, and takes the thread id from `$T3CODE_THREAD_ID`.
