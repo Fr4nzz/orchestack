@@ -9,7 +9,8 @@ owns it. The same state never wakes anyone twice.
             <project>/.work/orchestrator/jobs/, jobs.dirs, jobs.globs and the shared <state dir>/jobs/, which
             `watch.py add` writes to from any project. Optional expect_min / max_pend_h: a job still running at
             2x expect_min, or pending max_pend_h hours -> the owner, once. Owner thread gone -> its parent, once
-  children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread
+  children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread. A launched lead (no
+            T3 lineage) counts as a child of the parent named in its lead file (`watch.py lead`), here and below
   disk      free disk below the floor -> the orchestrator (urgent)
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
             (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
@@ -28,6 +29,9 @@ stay in an outbox and go out merged with later ones.
   watch.py [--dry-run] [--verbose] [--no-baseline] [--now ISO-TIME]
   watch.py add --job ID [--job ID ...] [--thread ID] [--parent ID] [--next-step TEXT] [--name NAME] [--dir DIR]
            (registers a job file; the thread defaults to $T3CODE_THREAD_ID, which T3 sets in every chat's shell)
+  watch.py lead --thread LEAD [--parent ID] [--remove]
+           (registers a t3_thread_launch child's parent, which T3 does not record; the parent defaults to
+           $T3CODE_THREAD_ID, so the orchestrator runs it right after the launch)
 
 --dry-run prints what it would do and changes nothing (no state written, no wake sent, no command run except the
 read-only checks). Config: the "watcher" section of config.json in $ORCHESTACK_CONFIG_DIR or ~/.config/orchestack.
@@ -311,11 +315,31 @@ class Ctx:
             self._db = None
 
     def thread(self, thread_id):
-        """(title, parent id) of a live thread, or None. Primary-key lookup."""
+        """(title, parent id) of a live thread, or None. Primary-key lookup. A thread without a T3 lineage parent
+        takes the parent from its lead file, if one exists (a launched lead)."""
         row = self.db().execute(Q_THREAD, (thread_id,)).fetchone()
         if not row or row[2] or row[3]:
             return None
-        return row[0], row[1]
+        return row[0], row[1] or lead_parent(thread_id)
+
+
+def leads_dir():
+    """Where `watch.py lead` records launched leads: <state dir>/leads, one <lead id>.json each."""
+    return state_dir() / "leads"
+
+
+def lead_file(thread_id):
+    return leads_dir() / (re.sub(r"[^A-Za-z0-9_.-]", "_", str(thread_id)).strip(".") + ".json")
+
+
+def lead_parent(thread_id):
+    """The parent a lead file names for this thread, or None (no file, unreadable, or not this thread)."""
+    try:
+        data = json.loads(lead_file(thread_id).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    parent = str(data.get("parent") or "") if data.get("thread") == str(thread_id) else ""
+    return parent if parent and THREAD_ID_RE.match(parent) and parent != str(thread_id) else None
 
 
 def projects(ctx):
@@ -398,7 +422,7 @@ def resolve_owner(ctx, thread, parent=""):
         return thread, False
     if not row or not row[2]:  # exists, or unknown here (an archived thread still takes a send)
         return thread, False
-    for cand in (parent, row[1]):
+    for cand in (parent, row[1] or lead_parent(thread)):
         if cand and THREAD_ID_RE.match(str(cand)) and ctx.thread(cand):
             return cand, True
     return ctx.orchestrator, True
@@ -684,7 +708,9 @@ def check_children(ctx):
                 ctx.note(f"children: {short(title, 40)} {what}, parent busy: retried next run")
                 continue  # not marked seen: decided once the parent is idle
             prun = db.execute(Q_LATEST_RUN, (parent,)).fetchone()
-            if prun and prun[2] > when:
+            # A parent run after the failure shows T3 relayed it, except for a launched lead, which is never
+            # relayed: its parent comes from a lead file, not the lineage.
+            if prun and prun[2] > when and parent != lead_parent(tid):
                 seen[key] = iso(ctx.now)
                 ctx.note(f"children: {short(title, 40)} {what}, parent already ran after it")
                 continue
@@ -1306,10 +1332,47 @@ def add_main(argv):
     return 0
 
 
+def lead_main(argv):
+    """`watch.py lead`: record (or remove) the parent of a launched lead, which T3 leaves out of the lineage."""
+    ap = argparse.ArgumentParser(prog="watch.py lead", description=(
+        "Record a t3_thread_launch child's parent, so the watcher treats it as that parent's child: a failed,"
+        " stuck or approval-waiting lead, or a report it ended with but never sent, wakes the parent."))
+    ap.add_argument("--thread", required=True, help="the launched lead's thread id")
+    ap.add_argument("--parent", default=os.environ.get("T3CODE_THREAD_ID", ""),
+                    help="the thread to wake for it (default: $T3CODE_THREAD_ID, the caller)")
+    ap.add_argument("--remove", action="store_true", help="forget this lead (its lane is finished)")
+    args = ap.parse_args(argv)
+    thread, parent = args.thread.strip(), args.parent.strip()
+    if not THREAD_ID_RE.match(thread):
+        print(f"watch.py lead: invalid --thread {thread!r}", file=sys.stderr)
+        return 2
+    path = lead_file(thread)
+    if args.remove:
+        if path.exists():
+            path.unlink()
+            print(f"watch.py lead: removed {path}")
+        else:
+            print(f"watch.py lead: no lead file for {thread}")
+        return 0
+    if not parent or not THREAD_ID_RE.match(parent) or parent == thread:
+        print("watch.py lead: no valid --parent and no T3CODE_THREAD_ID in the environment (run it from the parent"
+              " chat, or pass --parent)", file=sys.stderr)
+        return 2
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"thread": thread, "parent": parent}, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    print(f"watcher lead file: {path}\n  {thread} now counts as a child of {parent}."
+          f" Remove it with: watch.py lead --thread {thread} --remove")
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["add"]:
         return add_main(argv[1:])
+    if argv[:1] == ["lead"]:
+        return lead_main(argv[1:])
     ap = argparse.ArgumentParser(description="orchestack watcher: wake a chat only when something changed.")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
     ap.add_argument("--verbose", "-v", action="store_true", help="print every check's observations")

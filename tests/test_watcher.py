@@ -1840,3 +1840,81 @@ def test_waiting_array_range_is_one_id(tmp_path):
     own_job_file(rig, ("4101",))
     rig.run(at(45))
     assert rig.wakes() == []  # the base id covers the range
+
+
+# ---------- launched leads (watch.py lead) ----------
+
+def lead_cli(rig, *args, env_thread=None):
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(rig.tmp), "ORCHESTACK_STATE_DIR": str(rig.state_dir),
+           **({"T3CODE_THREAD_ID": env_thread} if env_thread else {})}
+    return subprocess.run([sys.executable, "-I", str(WATCH), "lead", *args], capture_output=True, text=True,
+                          env=env, timeout=30)
+
+
+def test_lead_cli_records_parent_from_env_and_removes(tmp_path):
+    rig = Rig(tmp_path)
+    assert lead_cli(rig, "--thread", "mcp:lead-9").returncode == 2  # no parent known
+    assert lead_cli(rig, "--thread", "mcp:lead-9", env_thread="mcp:lead-9").returncode == 2  # its own parent
+    assert lead_cli(rig, "--thread", "bad id", env_thread="orch-1").returncode == 2
+    p = lead_cli(rig, "--thread", "mcp:lead-9", env_thread="orch-1")
+    assert p.returncode == 0, p.stderr
+    f = rig.state_dir / "leads" / "mcp_lead-9.json"
+    assert json.loads(f.read_text()) == {"thread": "mcp:lead-9", "parent": "orch-1"}
+    assert lead_cli(rig, "--thread", "mcp:lead-9", "--remove").returncode == 0 and not f.exists()
+
+
+def launched_rig(tmp_path):
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "orch-1", "Orchestrator: shop")
+    add_thread(conn, "mcp:lead-9", "Lead: cluster wave", updated=at(10))  # launched: no T3 lineage
+    assert lead_cli(rig, "--thread", "mcp:lead-9", env_thread="orch-1").returncode == 0
+    rig.config(t3_db=str(db), children={}, decision={"minutes": 30})
+    rig.run(T0)  # baseline
+    return rig, conn
+
+
+def test_lead_failure_wakes_the_recorded_parent(tmp_path):
+    rig, conn = launched_rig(tmp_path)
+    add_run(conn, "mcp:lead-9", 1, "failed", at(5), at(10))
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert w[0]["text"].startswith('watcher: children: failed: "Lead: cluster wave" (mcp:lead-9) run failed.')
+
+
+def test_lead_failure_wakes_parent_even_after_the_parent_ran(tmp_path):
+    rig, conn = launched_rig(tmp_path)
+    add_run(conn, "mcp:lead-9", 1, "failed", at(5), at(10))
+    add_run(conn, "orch-1", 1, "completed", at(11), at(12))  # woken by something else: no relay of the lead
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+
+
+def test_lead_report_never_sent_wakes_parent_but_a_sent_one_is_quiet(tmp_path):
+    rig, conn = launched_rig(tmp_path)
+    add_message(conn, "a1", "mcp:lead-9", "assistant", "done: wave 3 finished, metrics in out/", at(10))
+    add_run(conn, "mcp:lead-9", 1, "completed", at(5), at(10))
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert 'child "Lead: cluster wave" (mcp:lead-9) ended with a done: report' in w[0]["text"]
+    (tmp_path / "b").mkdir()
+    rig2, conn2 = launched_rig(tmp_path / "b")
+    add_message(conn2, "a1", "mcp:lead-9", "assistant", "done: wave 3 finished, metrics in out/", at(10))
+    add_run(conn2, "mcp:lead-9", 1, "completed", at(5), at(10))
+    conn2.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('s1', 'orch-1', 'user', 0, ?, ?, ?)",
+                  (at(9), at(9), json.dumps({"text": "done: wave 3 finished", "senderThreadId": "mcp:lead-9"})))
+    conn2.commit()
+    rig2.run(at(45))
+    assert rig2.wakes() == []  # the lead sent its report itself
+
+
+def test_unregistered_launched_thread_stays_top_level(tmp_path):
+    rig, conn = launched_rig(tmp_path)
+    add_thread(conn, "mcp:other", "Some chat", updated=at(10))
+    add_run(conn, "mcp:other", 1, "failed", at(5), at(10))
+    rig.run(at(15))
+    assert rig.wakes() == []

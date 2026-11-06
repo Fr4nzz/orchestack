@@ -25,6 +25,9 @@ plan's usage meter) found:
 - An outdated copy of the rules pasted into a brief caused about 25 extra parent wakes.
 - 30 AI scheduled checks that woke a large orchestrator every 3 to 6 h cost about **1.6 % of a week in 4 days**,
   and most of them found no change. The watcher below replaces them.
+- T3 relays the end of every turn an async delegate task started to its parent, whatever it says. A launched lead
+  (`t3_thread_launch`) is never relayed and wakes its parent only by sending: one 6-day lead ran 293 turns and woke
+  its orchestrator 76 times.
 
 ## What is in it
 
@@ -121,7 +124,11 @@ each configured project's `.work/orchestrator/jobs/`, each directory in `jobs.di
 `"~/code/*/.work/orchestrator/jobs"`, where a matched directory means its `*.json`). A file reached twice counts once.
 After the wake, the chat moves its file to `done/` next to it. T3 does not tell a parent
 when a turn started by an outside send ends, so the wake tells a child owner to send its result to its parent with
-`t3_thread_send` (mode "queue"), naming the parent from `parent` or else from the thread's lineage. `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
+`t3_thread_send` (mode "queue"), naming the parent from `parent` or else from the thread's lineage. T3 records no
+lineage for a launched lead, so its parent runs `watch.py lead --thread <lead id>` right after the launch (the parent
+comes from `$T3CODE_THREAD_ID`, or `--parent`). It writes `~/.local/state/orchestack/leads/<id>.json`, and the
+`children` and `decision` checks then treat the lead as that parent's child. `--remove` deletes it when the lane is
+done. `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
 `["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job
 file is open, and a failed command decides nothing. "No job found" counts as an empty listing. Once the cluster
 answers, a job it no longer lists has ended (one never listed gets `missing_grace_minutes`, 30, from the file's

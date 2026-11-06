@@ -37,7 +37,7 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 4. **The orchestrator's context grows as needed.** Never compact or replace an orchestrator yourself (the user does
    that). Above about 400k, give its size and rough cost per wake in status replies.
-5. **Lead chats per project area.** A lead handles its children's notes, deploy requests and small questions on
+5. **Lead chats per project area** (launched per rule 11 where the user permits it). A lead handles its children's notes, deploy requests and small questions on
    its next real task. Leads and workers rely on harness auto-compaction. Around 500k *(soft guide)* the
    orchestrator may compact an idle lead or worker at a natural break by sending it exactly `/compact`, never to an
    orchestrator. Requests for the orchestrator are sent to it (`t3_thread_send`), not left in the requester's thread.
@@ -96,10 +96,23 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     is low, the weekly reset came or usage is far behind pace, a `decision:` sat unanswered. No recurring AI
     schedules. The one exception is a one-off wake at a projected finish the watcher cannot see. Record its id and
     delete it when the work settles. Completion notices already wake the parent.
-11. **Launched instead of delegated (opt-in, off by default).** A `t3_thread_launch` child does not wake its parent
-    at each turn end and reports only by sending a message. Use it only with the user's standing permission
-    (recorded in `local.md`). Its backstop is the watcher if the child carries a lineage parent (it then wakes the
-    parent when the child fails, waits or is stuck), otherwise one one-off scheduled wake.
+11. **Launch leads for long lanes** (only with the user's standing permission in `local.md`, off by default). A
+    `t3_thread_launch` child has no completion relay: it wakes its parent only when it sends a message, and the
+    relays of its own delegates wake it, not you. Measured: a 6-day drafting lead ran 293 turns and woke its
+    orchestrator 76 times, where a delegate could have woken it up to 293 times. With that permission, launch (don't
+    delegate) any lane expected to take more than about 10 turns or a day: cluster waves, multi-day drafting, app
+    work. One-off tasks and critics stay delegates. The permission is the user's request for a new thread that
+    T3's own instructions ask for. Without it, delegate and follow rules 7 to 9.
+    - Launch with the title `Lead: <lane>`, the project (`projectId`, `workspaceStrategy`), the model and account
+      `local.md` names for leads, and a brief with both blocks of rule 18. Then run
+      `python3 <orchestack>/watcher/watch.py lead --thread <its threadId>` in your own shell (add
+      `--parent <your id>` where the shell has no `$T3CODE_THREAD_ID`). T3 records no parent
+      for a launched thread, and this lead file lets the watcher wake you when the lead fails, is stuck, waits on
+      an approval, or ends a turn with a report it never sent. Run it again with `--remove` when the lane is done.
+    - Don't wait on or poll a lead: its send wakes you. Batch what you have for it into its next real task.
+    - The cost moves to the lead's sends: the same lead sent six messages in its first hour. A lead sends a
+      `done:` or `failed:` when an ask is finished, a `decision:` or `handoff:` when it needs its parent, and
+      never progress.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: see `bulk-image-review`), results to files and
     one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest, with a manifest of
     expected job ids and the fallback in the brief. For repeated well-specified waves, pilot a mid-tier model against
@@ -146,6 +159,14 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     > (or always, if you were launched rather than delegated), otherwise end the turn with it. Wait on your own
     > delegates with `t3_thread_wait`. End your turn only with the result, a failure, a real question, the
     > `waiting:` handoff, or the short line of a background wait.
+
+    For a launched lead (rule 11), add this block too, with your thread id:
+    > You were launched as a lead, not delegated: T3 relays none of your turn ends, so "every turn you end wakes
+    > your parent" does not apply to you, but follow the wait rules above all the same. Send your parent
+    > `<parent id>` (`t3_thread_send`, mode "queue") `done:` or `failed:` when an ask is finished, `decision:` or
+    > `handoff:` when you need it, never progress (that goes in `.work/orchestrator/NOTES.md`). Start a message
+    > with one of those four words only when you also send it: the watcher tells your parent about a report you
+    > ended a turn with but never sent, and about a failed or stuck turn.
 
     Never rewrite a command to get around a real permission check.
 

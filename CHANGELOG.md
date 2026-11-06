@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `watch.py lead --thread <id> [--parent <id>] [--remove]`: records a launched lead's parent, which T3 leaves out
+  of the lineage, so a failed, stuck or approval-waiting lead, or a report it ended with but never sent, wakes the
+  parent. Orchestrator rule 11 now launches leads for long lanes when the user grants standing permission, with a
+  second brief block for leads (send only final reports).
 - `watcher/watch.py`: change-only watcher on a 15-minute systemd `--user` timer, no model calls. Checks for
   cluster jobs (job files, owner thread woken), failed, waiting or stuck T3 children (parent woken), low disk,
   weekly usage reset or behind pace (backlog prompt), unanswered `decision:` messages, and a host-online copy hook.
