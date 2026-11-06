@@ -138,7 +138,7 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     > fresh timestamped output folders, no `git commit -a`, `git reset --hard`, `git clean` or force pushes. If a
     > command raises an approval prompt, rewrite it into the safe form rather than wait. Every turn you end wakes
     > your parent. Waits under 10 min: one foreground command (Bash `timeout` 600000, loop `CAP=420 PEND_S=300`).
-    > 10 to 45 min: one background command (Bash `timeout` at least the loop cap + 180 s) plus
+    > 10 to 45 min: one background command (Bash `timeout` at least (CAP+180) x 1000 ms, e.g. 3000000) plus
     > `t3_background_wait`, never re-armed: end that turn with one short line, and report in the turn its completion
     > starts. Longer, or if that loop runs out: `watch.py add` (with `--expect-min` and `--max-pend-h`), a state
     > file, then end once with `waiting: <job ids>`. Never send `waiting:` or `noted:`. To your parent, report only a
