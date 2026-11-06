@@ -33,6 +33,14 @@
 - Watcher `decision`: a child whose last message is a `waiting:` or `handoff:` naming a cluster job (`waiting: <ids>`,
   `job 4101`, `Job <4101>`) that no job file lists (open, ended or moved to `done/`, any owner) is woken itself,
   once, and told to register the wait with `watch.py add`. A message naming no job, or a background wait, stays quiet.
+- `watch.py add --expect-min N --max-pend-h H` (both optional): the jobs check wakes the owner once when a job still
+  runs at twice its expected runtime (a straggler) or still pends H hours after registration. `jobs.running_states`
+  and `jobs.pending_states` default to LSF and SLURM words.
+- Watcher `jobs`: before waking a job file's owner, the watcher checks the T3 thread still exists. If it is gone, its
+  parent (the file's `parent`, the lineage, else the orchestrator) is woken once with "orphaned jobs <ids> (thread
+  gone)" and gets the file's later wakes.
+- Watcher `expiry`: one alert per expiry, to the owner of the oldest open job file, instead of one to every owner
+  (two lanes ran the login script at once).
 - Watcher `expiry` check (opt-in): a login whose validity (`command` + `pattern`, e.g. `tsh status`) has less than
   `warn_minutes` left, or no longer matches the pattern, wakes the orchestrator once.
 - Watcher `expiry` runs only while a job file is open and wakes the owners of those files instead of the

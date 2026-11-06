@@ -1528,15 +1528,16 @@ def test_expiry_only_while_a_job_file_is_open_and_to_its_owners(tmp_path):
     shared.mkdir(parents=True)
     (shared / "a.json").write_text(json.dumps({"thread": "child-7", "jobs": ["101"]}))
     (shared / "b.json").write_text(json.dumps({"thread": "child-8", "jobs": ["101"]}))
+    os.utime(shared / "b.json", (parse_ts(T0) - 600, parse_ts(T0) - 600))  # b is the oldest open job file
     rig.run(at(1))
     w = rig.wakes()
-    assert sorted(x["thread"] for x in w) == ["child-7", "child-8"]  # the owners, not the orchestrator
-    assert all("tsh valid for 44 min more" in x["text"] for x in w)
+    assert [x["thread"] for x in w] == ["child-8"]  # one owner, not every owner (two logins at once collide)
+    assert "tsh valid for 44 min more" in w[0]["text"]
     rig.run(at(2))
-    assert rig.wakes() == []  # once per expiry time and recipient
+    assert rig.wakes() == []  # once per expiry time
     (shared / "c.json").write_text(json.dumps({"thread": "child-9", "jobs": ["101"]}))
     rig.run(at(3))
-    assert [x["thread"] for x in rig.wakes()] == ["child-9"]  # a new owner gets it too
+    assert rig.wakes() == []  # a new owner does not get a second warning for the same expiry
     listing.write_text("101 DONE\n")
     rig.run(at(20))
     assert all(x["text"].startswith("watcher: jobs:") for x in rig.wakes())  # jobs ended: their own wake only
@@ -1621,3 +1622,109 @@ def test_add_needs_a_thread_and_refuses_bad_ids_or_overwrites(tmp_path):
     assert p.returncode == 1 and "exists" in p.stderr
     rig.run(None, "add", "-j", "7", "--thread", "t1", "--name", "ev", "--dir", str(d), "--force")
     assert json.loads((d / "ev.json").read_text())["jobs"] == ["7"]
+
+
+def test_add_writes_expected_runtime_and_pending_limit(tmp_path):
+    rig = Rig(tmp_path)
+    rig.config()
+    d = tmp_path / "pj"
+    rig.run(None, "add", "-j", "6", "--thread", "t1", "--expect-min", "20", "--max-pend-h", "2", "--dir", str(d))
+    assert json.loads((d / "6.json").read_text()) == {"thread": "t1", "jobs": ["6"], "expect_min": 20,
+                                                      "max_pend_h": 2}
+    p = rig.run(None, "add", "-j", "7", "--thread", "t1", "--expect-min", "0", "--dir", str(d), check=False)
+    assert p.returncode == 2 and "positive" in p.stderr
+
+
+def limits_rig(tmp_path, state, **limits):
+    rig = Rig(tmp_path)
+    listing = tmp_path / "listing.txt"
+    listing.write_text(f"101 {state}\n")
+    rig.config(jobs={"command": rig.script("bjobs.py", f"print(open({str(listing)!r}).read(), end='')\n")})
+    shared = rig.state_dir / "jobs"
+    shared.mkdir(parents=True)
+    f = shared / "ev.json"
+    f.write_text(json.dumps({"thread": "child-7", "jobs": ["101"], **limits}))
+    os.utime(f, (parse_ts(T0), parse_ts(T0)))  # registered at T0
+    return rig, listing
+
+
+def test_jobs_straggler_wakes_once_at_twice_the_expected_runtime(tmp_path):
+    rig, listing = limits_rig(tmp_path, "RUN", expect_min=20)
+    rig.run(T0)  # baseline
+    rig.run(at(39))
+    assert rig.wakes() == []
+    rig.run(at(41))
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == ["child-7"]
+    assert "job 101 still running after twice its expected 20 min" in w[0]["text"]
+    rig.run(at(200))
+    assert rig.wakes() == []  # once
+    listing.write_text("101 DONE\n")
+    rig.run(at(260))
+    assert "all 1 jobs ended" in rig.wakes()[0]["text"]
+    (tmp_path / "b").mkdir()
+    rig, listing = limits_rig(tmp_path / "b", "PEND", expect_min=20)  # the run clock starts when it runs
+    rig.run(T0)
+    rig.run(at(60))
+    listing.write_text("101 RUN\n")
+    rig.run(at(70))
+    rig.run(at(105))
+    assert rig.wakes() == []
+    rig.run(at(111))
+    assert len(rig.wakes()) == 1
+
+
+def test_jobs_pending_past_the_limit_wakes_once(tmp_path):
+    rig, listing = limits_rig(tmp_path, "PEND", max_pend_h=2)
+    rig.run(T0)
+    rig.run(at(119))
+    assert rig.wakes() == []
+    rig.run(at(121))
+    w = rig.wakes()
+    assert [x["thread"] for x in w] == ["child-7"] and "job 101 still pending after 2 h" in w[0]["text"]
+    rig.run(at(300))
+    assert rig.wakes() == []
+    (tmp_path / "b").mkdir()
+    rig, listing = limits_rig(tmp_path / "b", "PEND")  # no limits: quiet
+    rig.run(T0)
+    rig.run(at(2000))
+    assert rig.wakes() == []
+
+
+def test_jobs_owner_gone_wakes_its_parent_once_and_takes_its_wakes(tmp_path):
+    for sub, setup in (("missing", "file-parent"), ("deleted", "lineage")):
+        (tmp_path / sub).mkdir()
+        rig, listing = limits_rig(tmp_path / sub, "RUN")
+        conn = make_db(tmp_path / sub / "state.sqlite")
+        add_thread(conn, "orch-1", "Orchestrator")
+        add_thread(conn, "lead-1", "Lead: wings", parent="orch-1")
+        f = rig.state_dir / "jobs" / "ev.json"
+        if setup == "file-parent":  # the thread vanished: only the job file names the parent
+            f.write_text(json.dumps({"thread": "child-7", "jobs": ["101"], "parent": "lead-1"}))
+        else:  # deleted: the lineage still names the parent
+            add_thread(conn, "child-7", "Worker", parent="lead-1")
+            conn.execute("UPDATE orchestration_v2_projection_threads SET deleted_at = ? WHERE thread_id = 'child-7'",
+                         (T0,))
+            conn.commit()
+        cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+        rig.config(jobs=cfg["jobs"], t3_db=str(tmp_path / sub / "state.sqlite"))
+        rig.run(T0)  # baseline
+        rig.run(at(15))
+        w = rig.wakes()
+        assert [x["thread"] for x in w] == ["lead-1"], sub
+        assert "orphaned jobs 101 (thread gone): ev.json belongs to child-7" in w[0]["text"]
+        rig.run(at(30))
+        assert rig.wakes() == []  # once
+        listing.write_text("101 DONE\n")
+        rig.run(at(90))  # past the rate limit
+        w = rig.wakes()
+        assert [x["thread"] for x in w] == ["lead-1"] and "all 1 jobs ended" in w[0]["text"], sub
+    (tmp_path / "live").mkdir()
+    rig, listing = limits_rig(tmp_path / "live", "RUN")
+    conn = make_db(tmp_path / "live" / "state.sqlite")
+    add_thread(conn, "child-7", "Worker")
+    cfg = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]
+    rig.config(jobs=cfg["jobs"], t3_db=str(tmp_path / "live" / "state.sqlite"))
+    rig.run(T0)
+    rig.run(at(15))
+    assert rig.wakes() == []  # the owner exists: nothing to say while the job runs

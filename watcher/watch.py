@@ -7,7 +7,8 @@ owns it. The same state never wakes anyone twice.
 
   jobs      cluster jobs named in job files ended or failed -> the owner thread. Job files are read from
             <project>/.work/orchestrator/jobs/, jobs.dirs, jobs.globs and the shared <state dir>/jobs/, which
-            `watch.py add` writes to from any project
+            `watch.py add` writes to from any project. Optional expect_min / max_pend_h: a job still running at
+            2x expect_min, or pending max_pend_h hours -> the owner, once. Owner thread gone -> its parent, once
   children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread
   disk      free disk below the floor -> the orchestrator (urgent)
   usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
@@ -16,8 +17,8 @@ owns it. The same state never wakes anyone twice.
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
             thread send from the child there) for 30 min -> its parent (noted:/waiting: never, nor a handoff: while
             the child owns an open job file); a waiting:/handoff: naming a job no job file lists -> the child, once
-  expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owners
-            of the open job files (urgent, opt-in)
+  expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owner
+            of the oldest open job file, once per expiry (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -357,6 +358,49 @@ def read_job_file(f):
             str(data.get("next_step") or ""), str(data.get("parent") or ""))
 
 
+def job_limits(f):
+    """(expected run minutes, max pending hours) from a job file's optional expect_min and max_pend_h, or None."""
+    data = json.loads(f.read_text(encoding="utf-8"))
+
+    def num(key):
+        try:
+            v = float(data.get(key))
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+    return num("expect_min"), num("max_pend_h")
+
+
+def oldest_open_job_owner(ctx):
+    """The owner of the oldest open job file (by modification time), or None."""
+    found = []
+    for f in job_files(ctx):
+        try:
+            found.append((f.stat().st_mtime, str(f), read_job_file(f)[0]))
+        except Exception:
+            continue
+    owners = set(open_job_owners(ctx))
+    for _m, _f, thread in sorted(found):
+        if thread in owners:
+            return thread
+    return None
+
+
+def resolve_owner(ctx, thread, parent=""):
+    """(thread to wake, gone) for a job owner: the owner while its T3 thread exists, else its parent (the job file's
+    `parent`, the lineage, or the orchestrator). Without a T3 database the owner is taken as it is."""
+    try:
+        row = ctx.db().execute(Q_THREAD, (thread,)).fetchone()
+    except Exception:
+        return thread, False
+    if row and not row[2]:  # exists (an archived thread still takes a send)
+        return thread, False
+    for cand in (parent, row[1] if row else None):
+        if cand and THREAD_ID_RE.match(str(cand)) and ctx.thread(cand):
+            return cand, True
+    return ctx.orchestrator, True
+
+
 def open_job_owners(ctx):
     """Owner threads of the job files still open: readable, not yet reported as ended by the jobs check, and (before
     the jobs check has run once) younger than KEEP_DAYS. Reads the committed jobs state, so a jobs check that failed
@@ -423,6 +467,8 @@ def check_jobs(ctx):
         ctx.note("jobs: no jobs.command configured")
         return
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 90)))
+    running_states = {s.upper() for s in sec.get("running_states") or ["RUN", "RUNNING", "R"]}
+    pending_states = {s.upper() for s in sec.get("pending_states") or ["PEND", "PENDING", "PD"]}
     no_jobs = bool(NO_JOBS_RE.search(out + err))  # LSF exits non-zero when it lists nothing
     if rc != 0 and not no_jobs:
         raise RuntimeError(f"cluster command failed ({rc}): {short(err, 120)}")
@@ -458,7 +504,12 @@ def check_jobs(ctx):
             if got:
                 s = "FAILED" if "FAILED" in got else "DONE" if all(x == "DONE" for x in got) else next(
                     x for x in got if x != "DONE")  # an array with elements still running has not ended
-                seen_jobs[j] = {"state": s, "at": iso(ctx.now)}
+                prev = seen_jobs.get(j) or {}
+                entry = {"state": s, "at": iso(ctx.now)}
+                if s in running_states:  # running since first seen so, or since registration if never seen before
+                    entry["run_since"] = prev.get("run_since") or (
+                        iso(ctx.now) if prev else iso(datetime.fromtimestamp(mtime, UTC)))
+                seen_jobs[j] = entry
             elif last in terminal:
                 s = last  # ended earlier, since dropped from the listing
             elif last or ctx.now - datetime.fromtimestamp(mtime, UTC) > grace:
@@ -470,6 +521,36 @@ def check_jobs(ctx):
         bad = [j for j, s in states.items() if s == "FAILED"]
         ended = all(s in terminal for s in states.values())
         rep = reported.setdefault(key, {})
+        owner = thread
+        thread, gone = resolve_owner(ctx, owner, parent)
+        if gone and not rep.get("orphaned") and not baseline:
+            ctx.wake(thread, "jobs", f"orphaned jobs {', '.join(jobs[:5])} (thread gone): {f.name} belongs to {owner},"
+                     " which no longer exists. Take the jobs over (point the job file's thread at the new owner) or"
+                     " close them.")
+            rep["orphaned"] = iso(ctx.now)
+        try:
+            expect_min, max_pend_h = job_limits(f)
+        except Exception:
+            expect_min = max_pend_h = None
+        if not baseline and not ended:
+            slow, pend = [], []
+            for j, s in states.items():
+                since = (seen_jobs.get(j) or {}).get("run_since")
+                if (expect_min and s in running_states and since and j not in (rep.get("slow") or [])
+                        and ctx.now - parse_iso(since) >= timedelta(minutes=2 * expect_min)):
+                    slow.append(j)
+                if (max_pend_h and s in pending_states and j not in (rep.get("pend") or [])
+                        and ctx.now - datetime.fromtimestamp(mtime, UTC) >= timedelta(hours=max_pend_h)):
+                    pend.append(j)
+            if slow:
+                rep["slow"] = (rep.get("slow") or []) + slow
+                ctx.wake(thread, "jobs", f"{f.name}: job {', '.join(slow[:5])} still running after twice its"
+                         f" expected {expect_min:g} min. A straggler? Check the host's load, and consider a copy"
+                         " that excludes the host.")
+            if pend:
+                rep["pend"] = (rep.get("pend") or []) + pend
+                ctx.wake(thread, "jobs", f"{f.name}: job {', '.join(pend[:5])} still pending after {max_pend_h:g} h."
+                         " Check the pending reason (e.g. bjobs -l) and whether a smaller request would start.")
         nxt = f" Next step: {short(next_step, 160)}" if next_step else ""
         counts = ", ".join(f"{s} {n}" for s, n in sorted(_count(states.values()).items()))
         if baseline and (bad or ended):
@@ -952,10 +1033,11 @@ def check_expiry(ctx):
         raise ValueError("expiry needs command and pattern")
     name = sec.get("name") or "login"
     if sec.get("only_with_jobs", True):
-        targets = open_job_owners(ctx)
-        if not targets:
+        oldest = oldest_open_job_owner(ctx)
+        if not oldest:
             ctx.note(f"expiry: {name} not checked, no open job file")
             return
+        targets = [resolve_owner(ctx, oldest)[0]]
     else:
         targets = [sec.get("thread") or ctx.orchestrator]
     rc, out, err = run_cmd(cmd, float(sec.get("timeout_s", 30)))
@@ -984,12 +1066,9 @@ def check_expiry(ctx):
     warned = st.get("warned")
     same = warned == key or (left is not None and warned not in (None, "unreadable")
                              and abs(parse_iso(warned) - until) <= timedelta(minutes=5))
-    told = set(st.get("warned_to") or []) if same else set()
-    if "warned_to" not in st and same:  # state from before warned_to: that warning went to the old recipient
-        told = set(targets)
-    new = [t for t in targets if t not in told]
-    if not new:
+    if same:  # one warning per expiry, to one thread: a second recipient would start a second login at once
         return
+    told, new = set(), targets
     st["warned"] = warned if same else key
     st["warned_to"] = sorted(told | set(new))
     for t in new:
@@ -1177,6 +1256,10 @@ def add_main(argv):
     ap.add_argument("--name", default="", help="job file name without .json (default: the first job id)")
     ap.add_argument("--dir", default="", help=f"directory to write to (default: {shared_jobs_dir()})")
     ap.add_argument("--force", action="store_true", help="replace a job file of the same name")
+    ap.add_argument("--expect-min", type=float, default=None,
+                    help="expected run time in minutes: wake once if a job still runs at twice that (a straggler)")
+    ap.add_argument("--max-pend-h", type=float, default=None,
+                    help="wake once if a job still pends this many hours after registration")
     args = ap.parse_args(argv)
     thread = args.thread.strip()
     if not thread or not THREAD_ID_RE.match(thread):
@@ -1187,6 +1270,10 @@ def add_main(argv):
     if args.parent and not THREAD_ID_RE.match(args.parent):
         print(f"watch.py add: invalid --parent {args.parent!r}", file=sys.stderr)
         return 2
+    for flag, v in (("--expect-min", args.expect_min), ("--max-pend-h", args.max_pend_h)):
+        if v is not None and not v > 0:
+            print(f"watch.py add: {flag} must be a positive number", file=sys.stderr)
+            return 2
     jobs = [str(j).strip() for j in args.job]
     bad = [j for j in jobs if not SAFE_JOB_RE.match(j)]
     if bad:
@@ -1200,7 +1287,9 @@ def add_main(argv):
         print(f"watch.py add: {path} exists (another wait on these jobs?). Use --name or --force.", file=sys.stderr)
         return 1
     data = {"thread": thread, "jobs": jobs, **({"parent": args.parent} if args.parent else {}),
-            **({"next_step": args.next_step} if args.next_step else {})}
+            **({"next_step": args.next_step} if args.next_step else {}),
+            **({"expect_min": args.expect_min} if args.expect_min else {}),
+            **({"max_pend_h": args.max_pend_h} if args.max_pend_h else {})}
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
