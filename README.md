@@ -96,7 +96,7 @@ chat once, with a short message that starts with the reason, e.g. `watcher: jobs
 | `jobs` | the thread named in the job file | every job in a job file ended, or one failed (where job files live: below). Also once per job: still running at twice `expect_min` after the watcher first saw it run (a straggler), or still pending `max_pend_h` hours after the file was written. When the owner thread is deleted in T3, its parent (the file's `parent`, the lineage, else the orchestrator) gets one "orphaned jobs <ids> (thread gone)" wake and the file's later wakes |
 | `children` | the child's parent | a T3 child thread's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
-| `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`. With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
+| `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`, or within `use_before_reset_h` (12) of the next `weekly_reset` less than `use_before_reset_below` (90) % is used (once per cycle: what is left is lost at the reset). With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
 | `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
 | `decision` | the child's parent | a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, and T3 never relayed it to the parent (the turn was started by an outside send, such as a jobs wake) nor did the child send the parent a message with `t3_thread_send` after it, or a report (`handoff (subject): ...` counts) earlier in that turn, idle for 30 min (`"children": false` turns it off). A relay under the task id of a `t3_thread_send` that started the child's turn counts. `noted:` and `waiting:` never wake the parent, nor does a `handoff:` from a child that owns an open job file |
 | `decision` | the child itself | a child's last message is a `waiting:` that names cluster jobs (`waiting: <ids>`, or `job 4101`, `Job <4101>`) that no job file (open, ended or in `done/`) lists, and the message names no background wait or `Monitor`: wakes the child once, asking it to run `watch.py add` for exactly those jobs |
@@ -165,6 +165,11 @@ watcher/watch.py --dry-run --verbose      # what it sees and would send, changes
 scripts/install.sh --dry-run --watcher    # then without --dry-run to enable the timer
 journalctl --user -u orchestack-watch     # what it sent
 ```
+
+`watch.py pace` prints, for each account in `usage`, its weekly use, where an even spread of the week (100 % over 7
+days, about 14 % per day) says it should be by now, the hours to its reset and what to do. Behind pace, spend the
+gap on queued work, within a day of the reset use what is left, and ahead of pace start no optional work. Orchestrators
+run it before stopping work for budget, and give lanes pace conditions instead of fixed percentages.
 
 ## Development
 

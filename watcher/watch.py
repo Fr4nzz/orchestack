@@ -12,7 +12,8 @@ owns it. The same state never wakes anyone twice.
   children  a T3 child thread failed, waits on an approval or is stuck -> its parent thread. A launched lead (no
             T3 lineage) counts as a child of the parent named in its lead file (`watch.py lead`), here and below
   disk      free disk below the floor -> the orchestrator (urgent)
-  usage     the weekly usage reset happened, or usage is far behind pace -> the orchestrator, with the backlog prompt
+  usage     the weekly usage reset happened, usage is far behind pace, or within use_before_reset_h (12) of the reset
+            under use_before_reset_below (90) % is used -> the orchestrator, with the backlog prompt (once per cycle)
             (optional "accounts": further accounts read from the same meter output, each with its own pattern/reset)
   decision  a decision: message to an orchestrator sat unanswered for 30 min -> that orchestrator; a child whose
             last message is a decision:, done:, failed: or handoff: that never reached its parent (no relay and no
@@ -29,6 +30,8 @@ stay in an outbox and go out merged with later ones.
   watch.py [--dry-run] [--verbose] [--no-baseline] [--now ISO-TIME]
   watch.py add --job ID [--job ID ...] [--thread ID] [--parent ID] [--next-step TEXT] [--name NAME] [--dir DIR]
            (registers a job file; the thread defaults to $T3CODE_THREAD_ID, which T3 sets in every chat's shell)
+  watch.py pace [--now ISO-TIME]
+           (per account: weekly use, where the pace says it should be by now, hours to its reset, and what to do)
   watch.py lead --thread LEAD [--parent ID] [--remove]
            (registers a t3_thread_launch child's parent, which T3 does not record; the parent defaults to
            $T3CODE_THREAD_ID, so the orchestrator runs it right after the launch)
@@ -88,6 +91,8 @@ WAIT_ID_RE = re.compile(r"\d{4,10}(?:\[[^\]\n]*\])?")  # one job id in a waiting
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
+PACE_FULL = 98.0  # use an account up to about this much before its reset: the rest is lost
+PACE_PER_DAY = 100 / 7  # an even spread of the week
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9:_%.][A-Za-z0-9:_%.-]*$")
 
 BACKLOG_PROMPT = (
@@ -234,6 +239,14 @@ def last_weekly(now, spec, tz):
     if cand > local:
         cand -= timedelta(days=7)
     return cand
+
+
+def hours_to_reset(now, spec, tz):
+    """(start of the current weekly cycle, hours to the next reset), the hours in real elapsed time (UTC), so a
+    daylight-saving change in the week is counted right."""
+    start = last_weekly(now, spec, tz)
+    nxt = start + timedelta(days=7)  # same wall-clock time a week on; the zone gives that day's offset
+    return start, max(0.0, (nxt.astimezone(UTC) - now.astimezone(UTC)).total_seconds() / 3600)
 
 
 # ---------- context ----------
@@ -821,10 +834,24 @@ def usage_account(ctx, sec, st, baseline, rc, out, err, prompt, name):
         st["reset_at"] = st["behind_at"] = iso(ctx.now)
     elif cycle:
         days = (ctx.now - cycle).total_seconds() / 86400
-        expected = min(100.0, float(sec.get("pace_per_day", 15)) * days)
+        left_h = hours_to_reset(ctx.now, sec["weekly_reset"], ctx.tz)[1]
+        use_h = float(sec.get("use_before_reset_h", 12))
+        below = float(sec.get("use_before_reset_below", 90))
+        unused_wake = False
+        if 0 < left_h <= use_h and pct < below and st.get("unused_cycle") != cycle_key and not baseline:
+            ctx.wake(ctx.orchestrator, "usage", f"{label}{PACE_FULL - pct:.0f} % of the week is still usable and the "
+                     f"reset is in {left_h:.0f} h: it is lost unless used (up to about {PACE_FULL:.0f} %).", prompt=prompt)
+            st["unused_cycle"] = cycle_key
+            st["behind_at"] = iso(ctx.now)  # it says the same, louder: the behind wake waits its rearm_hours
+            unused_wake = True
+        elif 0 < left_h <= use_h and baseline:
+            st["unused_cycle"] = cycle_key
+        expected = min(100.0, float(sec.get("pace_per_day", PACE_PER_DAY)) * days)
         behind = expected - pct >= float(sec.get("behind_by", 20))
         rearm = timedelta(hours=float(sec.get("rearm_hours", 24)))
-        if not behind:
+        if unused_wake:
+            pass  # the unused wake said it, and set behind_at so the behind wake waits its rearm_hours
+        elif not behind:
             st["behind_at"] = None
         elif baseline:
             st["behind_at"] = iso(ctx.now)  # first run: recorded, the next wake comes after rearm_hours
@@ -1332,6 +1359,70 @@ def add_main(argv):
     return 0
 
 
+def pace_lines(cfg, now):
+    """One verdict line per configured account, from the usage meter and each account's weekly reset. The pace
+    is an even spread of the week (100 % over 7 days): behind it, the gap is spare capacity for queued work;
+    within a day of the reset, whatever is left of that account is lost unless used."""
+    sec = cfg.get("usage") if isinstance(cfg.get("usage"), dict) else {}
+    if not sec.get("command"):
+        return ["pace: no usage.command in the watcher config"], 1
+    rc, out, err = run_cmd(sec["command"], float(sec.get("timeout_s", 60)))
+    base = {k: v for k, v in sec.items() if k != "accounts"}
+    accounts = [(None, base)] + [(a.get("name"), {**base, **a}) for a in (sec.get("accounts") or [])
+                                 if isinstance(a, dict)]
+    tz, lines, read = tzinfo(cfg.get("timezone")), [], 0
+    for name, acc in accounts:
+        label = name or "main"
+        pattern = acc.get("weekly_pattern") or r"(?:week|seven)\D*?([0-9]+(?:\.[0-9]+)?)\s*%"
+        m = re.search(pattern, out, re.I | re.M) if rc == 0 else None
+        if not m:
+            lines.append(f"{label}: no weekly percentage read (rc {rc}) {short(err or out, 80)}")
+            continue
+        pct = float(m.group(1))
+        read += 1
+        if not acc.get("weekly_reset"):
+            lines.append(f"{label}: {pct:.0f} % used (no weekly_reset configured, so no pace)")
+            continue
+        try:
+            start, left_h = hours_to_reset(now, acc["weekly_reset"], tz)
+        except (ValueError, IndexError) as e:
+            lines.append(f"{label}: {pct:.0f} % used, weekly_reset {acc['weekly_reset']!r} unreadable ({e})")
+            continue
+        per_day = float(acc.get("pace_per_day", PACE_PER_DAY))
+        days = (now.astimezone(UTC) - start.astimezone(UTC)).total_seconds() / 86400
+        expected = min(100.0, per_day * days)
+        gap = expected - pct
+        head = (f"{label}: {pct:.0f} % used, pace {expected:.0f} % by now, reset in {left_h:.0f} h "
+                f"({per_day:.1f} %/day)")
+        if left_h <= 24 and pct < PACE_FULL:
+            verdict = (f"the {PACE_FULL - pct:.0f} % left before the reset is lost unless used: use it on queued "
+                       "work (up to about 98 %)")
+        elif gap >= 1:
+            verdict = f"behind pace by {gap:.0f} points: spare capacity, start or continue queued valuable work"
+        elif gap <= -1:
+            verdict = f"ahead of pace by {-gap:.0f} points: finish approved work, start no optional work"
+        else:
+            verdict = "on pace"
+        lines.append(f"{head}. {verdict}.")
+    lines.append("Only accounts you are allowed to use count (see local.md).")
+    return lines, 0 if read else 1
+
+
+def pace_main(argv):
+    """`watch.py pace`: print each account's position against the weekly pace (no wake, no state)."""
+    ap = argparse.ArgumentParser(prog="watch.py pace", description=pace_main.__doc__)
+    ap.add_argument("--now", help="pretend the time is this ISO time (tests)")
+    args = ap.parse_args(argv)
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(f"pace: cannot read config: {e}", file=sys.stderr)
+        return 1
+    lines, rc = pace_lines(cfg, parse_iso(args.now) if args.now else datetime.now(UTC))
+    print("\n".join(lines))
+    return rc
+
+
 def lead_main(argv):
     """`watch.py lead`: record (or remove) the parent of a launched lead, which T3 leaves out of the lineage."""
     ap = argparse.ArgumentParser(prog="watch.py lead", description=(
@@ -1373,6 +1464,8 @@ def main(argv=None):
         return add_main(argv[1:])
     if argv[:1] == ["lead"]:
         return lead_main(argv[1:])
+    if argv[:1] == ["pace"]:
+        return pace_main(argv[1:])
     ap = argparse.ArgumentParser(description="orchestack watcher: wake a chat only when something changed.")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
     ap.add_argument("--verbose", "-v", action="store_true", help="print every check's observations")

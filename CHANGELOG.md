@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `watch.py pace`: per account, weekly use against an even pace (100 % over 7 days), hours to the reset and what to
+  do (behind: spare capacity for approved or queued work, near the reset: use what is left, ahead: no optional
+  work). The usage check also wakes once per cycle when an account nears its reset with capacity unused
+  (`use_before_reset_h`, `use_before_reset_below`). Orchestrator rule 3: budgets follow the pace, not fixed caps.
 - `watch.py lead --thread <id> [--parent <id>] [--remove]`: records a launched lead's parent, which T3 leaves out
   of the lineage, so a failed, stuck or approval-waiting lead, or a report it ended with but never sent, wakes the
   parent. Orchestrator rule 11 now launches leads for long lanes when the user grants standing permission, with a

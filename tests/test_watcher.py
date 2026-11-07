@@ -1918,3 +1918,75 @@ def test_unregistered_launched_thread_stays_top_level(tmp_path):
     add_run(conn, "mcp:other", 1, "failed", at(5), at(10))
     rig.run(at(15))
     assert rig.wakes() == []
+
+
+# ---------- pace ----------
+
+def pace_run(rig, now):
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(rig.tmp), "TZ": "UTC",
+           "ORCHESTACK_CONFIG_DIR": str(rig.cfg_dir), "ORCHESTACK_STATE_DIR": str(rig.state_dir)}
+    return subprocess.run([sys.executable, "-I", str(WATCH), "pace", "--now", now], capture_output=True, text=True,
+                          env=env, timeout=30)
+
+
+def test_pace_verdicts_per_account(tmp_path):
+    rig = Rig(tmp_path)
+    cmd = rig.script("meter.py", "print('seven_day used 20 %')\nprint('other seven_day used 70 %')\n"
+                                 "print('third seven_day used 50 %')\n")
+    # T0 is Wed 7 Jan 2026 12:00 UTC
+    rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "weekly_reset": "Sun 12:00",
+                      "accounts": [{"name": "other", "weekly_pattern": r"^other seven_day\s+used\s+([0-9.]+)",
+                                    "weekly_reset": "Wed 20:00"},
+                                   {"name": "third", "weekly_pattern": r"^third seven_day\s+used\s+([0-9.]+)",
+                                    "weekly_reset": "Mon 12:00"}]})
+    p = pace_run(rig, T0)
+    assert p.returncode == 0, p.stderr
+    main, other, third, note = p.stdout.strip().splitlines()
+    assert "allowed to use" in note
+    # 3 days into the main week: pace 43 %, used 20 %
+    assert main.startswith("main: 20 % used, pace 43 % by now, reset in 96 h") and "behind pace by 23 points" in main
+    # other resets in 8 h: what is left is lost
+    assert other.startswith("other: 70 % used, pace 95 % by now, reset in 8 h") and "28 % left before the reset" in other
+    # third: 2 days in (pace 29 %), used 50 %: ahead
+    assert "ahead of pace by 21 points" in third and "start no optional work" in third
+
+
+def test_pace_without_meter_config(tmp_path):
+    rig = Rig(tmp_path)
+    rig.config()
+    p = pace_run(rig, T0)
+    assert p.returncode == 1 and "no usage.command" in p.stdout
+
+
+def test_usage_unused_capacity_before_reset_wakes_once(tmp_path):
+    # T0 is Wed 12:00 UTC: with the reset Wed 20:00, it is 8 h away
+    rig, meter = usage_rig(tmp_path, 60, weekly_reset="Wed 20:00")
+    rig.run(at(-600))  # baseline, 18 h before the reset: outside the window
+    rig.run(T0)
+    w = rig.wakes()  # far behind pace too, but one wake only
+    assert len(w) == 1 and w[0]["text"].startswith("watcher: usage: 38 % of the week is still usable and the reset is in 8 h")
+    rig.run(at(60))
+    assert rig.wakes() == []  # once per cycle
+    (tmp_path / "b").mkdir()
+    rig2, meter2 = usage_rig(tmp_path / "b", 95, weekly_reset="Wed 20:00")
+    rig2.run(at(-600))
+    rig2.run(T0)
+    assert rig2.wakes() == []  # nearly used: no wake
+
+
+def test_pace_counts_real_hours_across_a_dst_change(tmp_path):
+    rig = Rig(tmp_path)
+    cmd = rig.script("meter.py", "print('seven_day used 50 %')\n")
+    rig.base["timezone"] = "America/New_York"
+    rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "weekly_reset": "Sun 12:00"})
+    # Sat 7 Mar 2026 23:00 EST; DST starts Sun 02:00, so Sun 12:00 EDT is 12 real hours away
+    p = pace_run(rig, "2026-03-08T04:00:00Z")
+    assert "reset in 12 h" in p.stdout, p.stdout
+
+
+def test_pace_exits_1_when_no_account_is_read(tmp_path):
+    rig = Rig(tmp_path)
+    cmd = rig.script("meter.py", "import sys\nsys.exit(3)\n")
+    rig.config(usage={"command": cmd, "weekly_reset": "Sun 12:00"})
+    p = pace_run(rig, T0)
+    assert p.returncode == 1 and "no weekly percentage read" in p.stdout

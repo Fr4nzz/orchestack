@@ -14,7 +14,6 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 - **Split the work into independent lanes and run them in parallel** through delegates, one worker per lane. The
   orchestrator routes and decides. Multi-step work goes to a worker with a brief. A small single step (one lookup,
   one edit, one reply) you may just do.
-- **Decide reversible, in-budget steps yourself and report afterwards,** whether the user is present or away.
 - **End-of-reply check.** Before ending a reply, look at the plan. If approved work that needs no answer remains,
   start it in the same reply with the next tool call. Never end with "want me to...?" or "next I'll..." instead.
 - **Re-read this installed file** (`~/.claude/skills/orchestrator/SKILL.md` or `~/.codex/skills/orchestrator/SKILL.md`)
@@ -22,16 +21,22 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 ## Budget
 
-1. **Price work in % of the week from a pilot.** Read the usage meter, run one small batch, read it again, and note
-   which other chats were active (the meter is shared). Never approve from token estimates: they leave out cache
+1. **Price work in % of the week from a pilot:** read the usage meter, run one small batch, read it again, and note
+   which other chats were active (the meter is shared). Never approve from token estimates, which leave out cache
    reads.
-2. **Ask the user before a programme (all its batches together) above about 5 % of the week** *(default)*, unless
-   that measured spend is already approved. Within budget, decide reversible steps yourself (a merge, a deploy of
-   tested work with a rollback, the next experiment, a cheap check). Ask only about irreversible or outward-facing
-   steps and facts only the user has. Before the user leaves, ask everything at once and give every chat a queue
-   of work that needs no answers. Never sit idle waiting for an answer.
-3. **Pace about 15 % of the week per day,** with at most one full 5-hour window per night or burst *(default)*.
-   Unused capacity can't be carried over, so the pace is also a target: when behind it, start queued valuable work.
+2. **Ask the user before a new programme (all its batches together) above about 5 % of the week** *(default)*, unless
+   that measured spend is already approved. Otherwise decide reversible steps yourself and report afterwards, whether
+   the user is present or away (a merge, a tested deploy with a rollback, the next experiment). Ask only about
+   irreversible or outward-facing steps and facts only the user has. Before the user leaves, ask everything at once
+   and give every chat a queue of work that needs no answers. Never idle on an answer.
+3. **Budgets follow the pace, not fixed numbers.** An account should use 100 % of its week evenly, about 14 % per
+   day. `python3 <orchestack>/watcher/watch.py pace` prints each account's use, the pace for now and the hours to its
+   reset. On accounts you may use (`local.md`): behind pace, the gap is spare capacity for approved or queued work
+   under rule 2's threshold, never approval for a new programme. Within a day of a reset, what is left is lost, so
+   use it the same way (up to about 98 %). Ahead of pace, start no optional work. Set your own lane limits as pace
+   conditions ("until this account reaches pace"), not fixed %, and run `pace` before stopping for budget: a limit
+   you set (not one the user stated) reached while behind pace is extended and reported. At most one full 5-hour
+   window per night or burst *(default)*.
 
 ## Shape of the work
 
@@ -44,10 +49,9 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
    (`t3_thread_send`), not left in the requester's thread, except a child's report to its parent (rule 7). One
    owner per lane: a chat that gets feedback on a lane it does not own forwards it to the lane's owner instead of
    dispatching its own workers, because two owners dispatch duplicate work.
-6. **Every wake re-reads the whole context,** about 0.1x its size within the cache lifetime (about 1 h) and about 2x
-   after. So batch small items for a big idle chat into its next real task. Above about 400k, start a fresh worker
-   for multi-step work instead of doing it in place (a fresh start pays back after 1 to 2 steps). Don't reuse a
-   finished delegate for a new unrelated task once it is large.
+6. **Every wake re-reads the whole context,** about 0.1x its size within the cache lifetime (about 1 h), 2x after. So
+   batch small items for a big idle chat into its next real task. Above about 400k, give multi-step work to a fresh
+   worker (it pays back after 1 to 2 steps), and never reuse a large finished delegate for an unrelated task.
 7. **Progress is not news, but anything the user can open or decide on is.** Children and sub-leads send up only
    messages that start with `decision:`, `done:`, `failed:` or `handoff:`. A deliverable the user is meant to open or
    review (a page, report, figure or draft, not intermediate outputs) is a `done:` with its link, sent at once
@@ -84,19 +88,18 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
    whatever it says (rule 7).
    - Under 10 min: one foreground command that blocks until the jobs end, with the Bash tool's `timeout`
      parameter set to 600000 (its default is 120000) and a loop cap to match (`CAP=420`). No extra wake.
-   - 10 to 45 min: ONE background command with the Bash tool's `timeout` parameter at least (CAP+180) x 1000 ms
-     (3000000 for `CAP=2700`; the default slot is 30 min, the maximum 7200000), then `t3_background_wait` on it.
-     `t3_background_wait` does not block: it only delays the relay of this turn's end until the command ends.
-     The parent then gets two relays close together: end that turn with one short line and nothing to report,
-     and give the report in the turn the completion starts.
+   - 10 to 45 min: ONE background command with the Bash tool's `timeout` at least (CAP+180) x 1000 ms (3000000 for
+     `CAP=2700`, maximum 7200000), then `t3_background_wait`, which does not block: it delays this turn's relay
+     until the command ends, so the parent gets two relays close together. End that turn with one short line and
+     report in the turn the completion starts.
    - Never re-arm a background loop: each re-arm adds relays (one child woke its orchestrator 12 times overnight
      this way). Over 45 min, or if the loop ends with `CAP_REACHED` or a pending report: rule 8.
    - Codex: one foreground command within the tool timeout, never a series of `sleep` tool calls.
 10. **Use the orchestack watcher instead of AI scheduled checks.** It runs every 15 min without a model and wakes a
-    chat only when something changed: jobs ended or failed, a child failed, waits on an approval or is stuck, disk
-    is low, the weekly reset came or usage is far behind pace, a `decision:` sat unanswered. No recurring AI
-    schedules. The one exception is a one-off wake at a projected finish the watcher cannot see. Record its id and
-    delete it when the work settles. Completion notices already wake the parent.
+    chat only when something changed: jobs ended or failed, a child failed, waits on an approval or is stuck, disk is
+    low, the weekly reset came, usage is far behind pace or unused before a reset, a `decision:` sat unanswered. No
+    recurring AI schedules, except a one-off wake at a projected finish the watcher cannot see (record its id, delete
+    it when the work settles).
 11. **Launch leads for long lanes** (only with the user's standing permission in `local.md`, off by default). A
     `t3_thread_launch` child has no completion relay: it wakes its parent only when it sends, and its own delegates'
     relays wake it, not you (measured: a 6-day lead ran 293 turns and woke it 76 times, a delegate up to 293). With
@@ -116,9 +119,9 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
       when an ask is finished or a deliverable is ready for the user (rule 7), `failed:` when it fails, a `decision:`
       or `handoff:` when it needs its parent, and never progress.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: see `bulk-image-review`), results to files and
-    one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest, with a manifest of
-    expected job ids and the fallback in the brief. For repeated well-specified waves, pilot a mid-tier model against
-    the default on one batch and keep the cheaper one if a spot check passes.
+    one summary back. Pilot cluster jobs on one part for memory and runtime, then size the rest, with a manifest of
+    expected job ids and the fallback in the brief. For repeated waves, pilot a cheaper model against the default on
+    one batch and keep it if a spot check passes.
 13. **Memory, not the number of agents, is the limit.** Before local app, browser, build or model work, check free
     RAM. The orchestack memory gate denies a dispatch below its threshold. Retry after the next completion notice.
 
@@ -133,13 +136,13 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     cluster" is not safe: one result sat unread for 6.6 h that way. Check a silent child at its projected finish.
 15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
     done-check before reporting it done. Before handing the user a link or file, open it the way they will.
-16. **Deploy finished, tested work by default** where the project allows it, always with a rollback path.
-    Shared slots (a deploy, a GPU) use one lock file per server that names the holder, start time and rollback
-    path. The holder builds on the newest live release and sends one `done:` after.
-17. **Hygiene:** keep large untracked outputs out of repos the harness checkpoints every turn (move or ignore them
-    above about 50 MB per file), and check untracked sizes and free disk before a long run. Push only your own
-    commits: if `git log origin/<branch>..HEAD` lists other chats' commits, branch from `origin/<branch>`,
-    cherry-pick yours and push that.
+16. **Deploy finished, tested work by default** where the project allows it, with a rollback path. Shared slots (a
+    deploy, a GPU) use one lock file per server naming holder, start time and rollback path. The holder builds on the
+    newest live release and sends one `done:` after.
+17. **Hygiene:** move or ignore untracked outputs above about 50 MB per file in repos the harness checkpoints every
+    turn, and check untracked sizes and free disk before a long run. Push only your own commits: if `git log
+    origin/<branch>..HEAD` lists other chats' commits, branch from `origin/<branch>`, cherry-pick yours and push
+    that.
 
 ## Briefs
 
@@ -177,24 +180,21 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 ## Models and review
 
-19. **Use the pinned default model and choose the effort on purpose:** low or medium for routine steps, high for
-    hard ones, never max by default. Only the user changes pinned models. Suggest a newer or pricier one instead of
-    switching. A mid-tier model at medium effort suits well-specified work. A small model only for read-only
-    scouting, script-verified results, or a calibrated image first pass (`bulk-image-review`), never for final
-    judgement.
+19. **Use the pinned default model and choose the effort on purpose:** low or medium for routine steps, high for hard
+    ones, never max by default. Only the user changes pinned models (suggest, never switch). A mid-tier model at
+    medium effort suits well-specified work, a small one only read-only scouting, script-verified results or a
+    calibrated image first pass (`bulk-image-review`), never final judgement.
 20. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
     independent reviews per round (the other vendor's model and a fresh default-vendor model).
 
 ## Backlog
 
 21. **Record every idea that is not executed now** (the user's, a child's or your own) in
-    `.work/orchestrator/IDEAS.md` in the project when it comes up, one block per idea:
-
-    `## <the idea in one line>`, then lines `- origin: <who or which chat>, <YYYY-MM-DD>`, `- value: <for the
-    user>`, `- cost: <rough % of the week>`, `- reversible: yes | no` and `- status: open | started <YYYY-MM-DD>
-    <thread> | done | dropped (<why>)`.
-22. **On the watcher's backlog prompt** (weekly reset, or far behind pace): pick the most valuable reversible,
-    in-budget open item the user would be proud to find started, run it through delegates, set its status and
-    report afterwards. Empty backlog: mine the notes file and recent chats for forgotten ideas, propose 3 grounded
-    in the project's current state, add them and start the best reversible one. Irreversible or outward-facing
-    items wait for the user.
+    `.work/orchestrator/IDEAS.md` in the project when it comes up, one block per idea: `## <the idea in one line>`,
+    then lines `- origin: <who or which chat>, <YYYY-MM-DD>`, `- value: <for the user>`, `- cost: <rough % of the
+    week>`, `- reversible: yes | no` and `- status: open | started <YYYY-MM-DD> <thread> | done | dropped (<why>)`.
+22. **On the watcher's backlog prompt** (weekly reset, far behind pace, or unused capacity before a reset): start the
+    most valuable reversible, in-budget open item the user would be proud to find started, through delegates, set its
+    status and report afterwards. Empty backlog: mine the notes file and recent chats for forgotten ideas, add 3
+    grounded in the project's current state and start the best reversible one. Irreversible or outward-facing items
+    wait for the user.
