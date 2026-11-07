@@ -37,46 +37,49 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 4. **The orchestrator's context grows as needed.** Never compact or replace an orchestrator yourself (the user does
    that). Above about 400k, give its size and rough cost per wake in status replies.
-5. **Lead chats per project area** (launched per rule 11 where the user permits it). A lead handles its children's notes, deploy requests and small questions on
-   its next real task. Leads and workers rely on harness auto-compaction. Around 500k *(soft guide)* the
-   orchestrator may compact an idle lead or worker at a natural break by sending it exactly `/compact`, never to an
-   orchestrator. Requests for the orchestrator are sent to it (`t3_thread_send`), not left in the requester's thread.
-   A child reporting to its own parent follows rule 7 instead (send or end with it, never both).
-   One owner per lane: a chat that gets feedback on a lane it does not own forwards it to the lane's owner instead
-   of dispatching its own workers, because two owners dispatch duplicate work.
+5. **Lead chats per project area** (launched per rule 11 where the user permits it). A lead handles its children's
+   notes, deploy requests and small questions on its next real task. Leads and workers rely on harness
+   auto-compaction. Around 500k *(soft guide)* the orchestrator may compact an idle lead or worker at a natural
+   break by sending it exactly `/compact`, never to an orchestrator. Requests for the orchestrator are sent to it
+   (`t3_thread_send`), not left in the requester's thread, except a child's report to its parent (rule 7). One
+   owner per lane: a chat that gets feedback on a lane it does not own forwards it to the lane's owner instead of
+   dispatching its own workers, because two owners dispatch duplicate work.
 6. **Every wake re-reads the whole context,** about 0.1x its size within the cache lifetime (about 1 h) and about 2x
    after. So batch small items for a big idle chat into its next real task. Above about 400k, start a fresh worker
    for multi-step work instead of doing it in place (a fresh start pays back after 1 to 2 steps). Don't reuse a
    finished delegate for a new unrelated task once it is large.
-7. **Progress is not news.** Children and sub-leads send up only messages that start with `decision:`, `done:`,
-   `failed:` or `handoff:`. FYIs and progress go to a notes file (default `.work/orchestrator/NOTES.md` in the
-   project) that the lead reads on its next real task. Answer a stray progress note in one line or not at all.
-   A turn that only logs progress ends with `noted: ...`, a long wait with `waiting: <job ids> ...`: turn endings,
-   never sends. The watcher never wakes anyone for them, but **T3 relays an async delegate's turn end to its
-   parent whatever it says** when its task, its parent's message or a background command started the turn. So
-   the only way to wake the parent less is to end fewer turns: wait inside a turn (rule 9) or through the watcher
-   (rule 8). A report is either sent or the turn ends with it, never both: a relayed turn ends with it. A turn the
-   watcher started is not relayed, nor (seen once, four critic turns) one its own delegate's completion started,
-   and a scheduled wake is not verified: each of these sends the report (one such report, without its `done:`
-   word, sat unread 2.2 h). A launched child (rule 11) always sends. Wait on your own delegates and critics with
-   `t3_thread_wait` inside the turn, never by ending it. Start every report with its word: the watcher catches it.
-   Don't send FYIs or notes to a running child: each one starts a child turn whose end is relayed back to you.
-   Put them in its state or notes file and send only what changes its current step.
+7. **Progress is not news, but anything the user can open or decide on is.** Children and sub-leads send up only
+   messages that start with `decision:`, `done:`, `failed:` or `handoff:`. A deliverable the user is meant to open or
+   review (a page, report, figure or draft, not intermediate outputs) is a `done:` with its link, sent at once
+   (`t3_thread_send`, mode "queue") even mid-lane while the work goes on, one per deliverable or batch. Only a final
+   report follows the send-or-end rule below. A lead forwards such reports from its workers in the same turn (two
+   leads sat on finished review pages until the user found them). Other FYIs and progress go to a notes file (default
+   `.work/orchestrator/NOTES.md` in the project) that the lead reads on its next real task. Answer a stray progress
+   note in one line or not at all. A turn that only logs progress ends with `noted: ...`, a long wait with `waiting:
+   <job ids> ...`: turn endings, never sends. The watcher never wakes anyone for them, but **T3 relays an async
+   delegate's turn end to its parent whatever it says** when its task, its parent's message or a background command
+   started the turn. So the only way to wake the parent less is to end fewer turns: wait inside a turn (rule 9) or
+   through the watcher (rule 8). A report is either sent or the turn ends with it, never both: a relayed turn ends
+   with it. A turn the watcher started is not relayed, nor (seen once, four critic turns) one its own delegate's
+   completion started, and a scheduled wake is not verified: each of these sends the report (one such report, without
+   its `done:` word, sat unread 2.2 h). A launched child (rule 11) always sends. Wait on your own delegates and
+   critics with `t3_thread_wait` inside the turn, never by ending it. Start every report with its word: the watcher
+   catches it. Don't send FYIs or notes to a running child: each one starts a child turn whose end is relayed back to
+   you. Put them in its state or notes file and send only what changes its current step.
 
 ## Waiting
 
-8. **Long waits (over about 45 min, e.g. cluster jobs) take precedence over everything below:** submit (for scheduler jobs, first wait on the short-wait path until
-   the job runs or about 20 min pass, see the cluster skill), register the wait with
-   `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..." --expect-min <expected runtime> --max-pend-h <limit, e.g. 3>`
-   (always supply both: without them the straggler and pending wakes are off. It writes a job file to
-   `~/.local/state/orchestack/jobs/`, works from any project, and takes the thread id from `$T3CODE_THREAD_ID`.
-   `--parent` is optional, else the watcher uses lineage), write a state file (outputs, next step), and end the turn with `waiting:` plus the job ids. The watcher
-   wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake at the
-   projected finish instead. At the wake, a fresh worker (or the child) reads the state file, moves the job file
-   to the `done/` folder next to it and reports `done:` or `failed:`. A child sends it with
-   `t3_thread_send` (mode "queue", rule 7: watcher turns are not relayed). If jobs are still running (a straggler or pend-limit wake),
-   leave the open job file in place, act if needed and end with `waiting:` without sending anything. Re-add with
-   `watch.py add` only jobs whose file you moved to `done/` (e.g. the survivors after a one-failed wake). A background wait that times out after 2 h returns to an expired cache and costs more.
+8. **Long waits (over about 45 min, e.g. cluster jobs) take precedence over everything below.** Submit (scheduler
+   jobs first wait on the short-wait path until they run or about 20 min pass, see the cluster skill), then run
+   `python3 <orchestack>/watcher/watch.py add --job <id> [--job ...] --next-step "..." --expect-min <runtime> --max-pend-h <e.g. 3>`
+   (both limits always, or the straggler and pending wakes are off. It works from any project, takes the thread id
+   from `$T3CODE_THREAD_ID` and writes the job file to `~/.local/state/orchestack/jobs/`), write a state file
+   (outputs, next step) and end the turn with `waiting:` plus the job ids. The watcher wakes that thread once when
+   every job ended or one failed (without the watcher, schedule ONE wake at the projected finish). At the wake, read
+   the state file, move the job file to the `done/` folder next to it and report `done:` or `failed:` (a child sends
+   it with `t3_thread_send`, mode "queue", rule 7). On a straggler or pend-limit wake, keep the open job file, act if
+   needed and end with `waiting:`, sending nothing. Re-add the survivors of a one-failed wake (only jobs whose file
+   you moved to `done/`). A background wait that times out after 2 h returns to an expired cache.
 9. **Short waits (under about 45 min): as few turn ends as possible,** because a relayed turn end wakes the parent
    whatever it says (rule 7).
    - Under 10 min: one foreground command that blocks until the jobs end, with the Bash tool's `timeout`
@@ -95,13 +98,13 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
     schedules. The one exception is a one-off wake at a projected finish the watcher cannot see. Record its id and
     delete it when the work settles. Completion notices already wake the parent.
 11. **Launch leads for long lanes** (only with the user's standing permission in `local.md`, off by default). A
-    `t3_thread_launch` child has no completion relay: it wakes its parent only when it sends a message, and the
-    relays of its own delegates wake it, not you. Measured: a 6-day drafting lead ran 293 turns and woke its
-    orchestrator 76 times, where a delegate could have woken it up to 293 times. With that permission, launch (don't
-    delegate) any lane expected to take more than about 10 turns or a day: cluster waves, multi-day drafting, app
-    work, or any task with two or more steps that each wait 10 min or more on a background command or cluster job
-    (render, train, evaluate). Decide this when you dispatch, from the planned steps. One-off tasks and critics stay delegates. The permission is the user's request for a new thread that
-    T3's own instructions ask for. Without it, delegate and follow rules 7 to 9.
+    `t3_thread_launch` child has no completion relay: it wakes its parent only when it sends, and its own delegates'
+    relays wake it, not you (measured: a 6-day lead ran 293 turns and woke it 76 times, a delegate up to 293). With
+    that permission, launch (don't delegate) any lane expected to take more than about 10 turns or a day: cluster
+    waves, multi-day drafting, app work, or any task with two or more steps that each wait 10 min or more on a
+    background command or cluster job (render, train, evaluate). Decide this when you dispatch, from the planned
+    steps. One-off tasks and critics stay delegates. The permission is the user's request for a new thread that T3's
+    own instructions ask for. Without it, delegate and follow rules 7 to 9.
     - Launch with the title `Lead: <lane>`, the project (`projectId`, `workspaceStrategy`), the model and account
       `local.md` names for leads, and a brief with both blocks of rule 18. Then run
       `python3 <orchestack>/watcher/watch.py lead --thread <its threadId>` in your own shell (add
@@ -109,9 +112,9 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
       for a launched thread, and this lead file lets the watcher wake you when the lead fails, is stuck, waits on
       an approval, or ends a turn with a report it never sent. Run it again with `--remove` when the lane is done.
     - Don't wait on or poll a lead: its send wakes you. Batch what you have for it into its next real task.
-    - The cost moves to the lead's sends: the same lead sent six messages in its first hour. A lead sends a
-      `done:` or `failed:` when an ask is finished, a `decision:` or `handoff:` when it needs its parent, and
-      never progress.
+    - The cost moves to the lead's sends: the same lead sent six messages in its first hour. A lead sends a `done:`
+      when an ask is finished or a deliverable is ready for the user (rule 7), `failed:` when it fails, a `decision:`
+      or `handoff:` when it needs its parent, and never progress.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: see `bulk-image-review`), results to files and
     one summary back. Pilot cluster jobs: one part for memory and runtime, then size the rest, with a manifest of
     expected job ids and the fallback in the brief. For repeated well-specified waves, pilot a mid-tier model against
@@ -121,13 +124,13 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 
 ## Shared state
 
-14. **Status checks read each child's live run state** (running, idle, failed, waiting on approval), not only logs.
-    After an outage (full disk, provider failure, harness restart), fix what still fails, then resume what broke,
-    checking for uncommitted edits first. After you move a child to another account or thread, restart it, or
-    the cluster login expires, list every child that was waiting on an external job and confirm each one still
-    has a live wake (a watcher job file or a running background wait). A pending background wait does not
-    survive the move. "It was only waiting on the cluster" is not safe: one result sat unread for 6.6 h that
-    way. Check a silent child at its projected finish.
+14. **Status checks read each child's live run state** (running, idle, failed, waiting on approval) and each lead's
+    latest messages, its workers' `done:` lines included, not only logs or processes. After an outage (full disk,
+    provider failure, harness restart), fix what still fails, then resume what broke, checking for uncommitted edits
+    first. After you move a child to another account or thread, restart it, or the cluster login expires, list every
+    child that was waiting on an external job and confirm each one still has a live wake (a watcher job file or a
+    running background wait). A pending background wait does not survive the move. "It was only waiting on the
+    cluster" is not safe: one result sat unread for 6.6 h that way. Check a silent child at its projected finish.
 15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
     done-check before reporting it done. Before handing the user a link or file, open it the way they will.
 16. **Deploy finished, tested work by default** where the project allows it, always with a rollback path.
@@ -141,32 +144,34 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 ## Briefs
 
 18. **Keep briefs short.** Quote the user's words for the goal, list the explicit asks as a done-check the child runs
-    before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy
-    the block below word for word into every brief, and check it is there before dispatch. A brief that leaves it
-    out or changes its wait or report lines (for example "background waits as a shell loop", or "send `waiting:`
-    up") is a bug that costs parent wakes:
-
+    before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy the
+    block below word for word into every brief and check it is there before dispatch: a brief that drops or rewords
+    its wait or report lines (e.g. "background waits as a shell loop", "send `waiting:` up") costs parent wakes.
     > Command safety: absolute paths, no `cd` in compound commands, no `rm` of globs, variables or relative paths,
     > fresh timestamped output folders, no `git commit -a`, `git reset --hard`, `git clean` or force pushes. If a
-    > command raises an approval prompt, rewrite it into the safe form rather than wait. Most turns you end wake
-    > your parent. Waits under 10 min: one foreground command (Bash `timeout` 600000, loop `CAP=420 PEND_S=300`).
-    > 10 to 45 min: one background command (Bash `timeout` at least (CAP+180) x 1000 ms, e.g. 3000000) plus
+    > command raises an approval prompt, rewrite it into the safe form rather than wait. Most turns you end wake your
+    > parent. Waits under 10 min: one foreground command (Bash `timeout` 600000, loop `CAP=420 PEND_S=300`). 10 to 45
+    > min: one background command (Bash `timeout` at least (CAP+180) x 1000 ms, e.g. 3000000) plus
     > `t3_background_wait`, never re-armed: end that turn with one short line, and report in the turn its completion
     > starts. Longer, or if that loop runs out: `watch.py add` (with `--expect-min` and `--max-pend-h`), a state
     > file, then end once with `waiting: <job ids>`. Never send `waiting:` or `noted:`. To your parent, report only a
-    > final `decision:`, `done:`, `failed:` or `handoff:`, starting with that word: send it from a turn the watcher,
-    > a scheduled wake or one of your own delegates' completion notices started (or always, if you were launched
-    > rather than delegated), otherwise end the turn with it. Wait on your own delegates and critics with
-    > `t3_thread_wait` in the same turn, never by ending your turn. End your turn only with the result, a failure,
-    > a real question, the `waiting:` handoff, or the short line of a background wait.
+    > final `decision:`, `failed:` or `handoff:`, or a `done:`, starting with that word: send it from a turn the
+    > watcher, a scheduled wake or one of your own delegates' completion notices started (or always, if you were
+    > launched rather than delegated), otherwise end the turn with it. A deliverable the user is meant to open or
+    > review (rule 7) is sent at once as `done: <what> <link>, work continues` (`t3_thread_send`, mode "queue") while
+    > you keep working. One that ends your task is your final report. Wait on your own delegates and critics with
+    > `t3_thread_wait` in the same turn, never by ending your turn. End your turn only with the result, a failure, a
+    > real question, the `waiting:` handoff, or the short line of a background wait.
 
     For a launched lead (rule 11), add this block too, with your thread id:
-    > You were launched as a lead, not delegated: T3 relays none of your turn ends, so "most turns you end wake
-    > your parent" does not apply to you, but follow the wait rules above all the same. Send your parent
-    > `<parent id>` (`t3_thread_send`, mode "queue") `done:` or `failed:` when an ask is finished, `decision:` or
-    > `handoff:` when you need it, never progress (that goes in `.work/orchestrator/NOTES.md`). Start a message
-    > with one of those four words only when you also send it: the watcher tells your parent about a report you
-    > ended a turn with but never sent, and about a failed or stuck turn.
+    > You were launched as a lead, not delegated: T3 relays none of your turn ends, so "most turns you end wake your
+    > parent" does not apply to you, but follow the wait rules above all the same. Send your parent `<parent id>`
+    > (`t3_thread_send`, mode "queue") `done:` when an ask is finished, and `done: <what> <link>` when a deliverable
+    > the user is meant to open or review is ready (a page, report, figure, draft, not intermediate outputs: yours or
+    > a worker's, even mid-lane, in the same turn), `failed:`, and `decision:` or `handoff:` when you need it. Never
+    > send progress (that goes in `.work/orchestrator/NOTES.md`). Start a message with one of those four words only
+    > when you also send it: the watcher tells your parent about a report you ended a turn with but never sent, and
+    > about a failed or stuck turn.
 
     Never rewrite a command to get around a real permission check.
 
@@ -185,14 +190,9 @@ marked *(default)* are chosen policy, not measurements. The README has the measu
 21. **Record every idea that is not executed now** (the user's, a child's or your own) in
     `.work/orchestrator/IDEAS.md` in the project when it comes up, one block per idea:
 
-    ```
-    ## <the idea in one line>
-    - origin: <who or which chat>, <YYYY-MM-DD>
-    - value: <what it gives the user>
-    - cost: <rough % of the week>
-    - reversible: yes | no
-    - status: open | started <YYYY-MM-DD> <thread> | done | dropped (<why>)
-    ```
+    `## <the idea in one line>`, then lines `- origin: <who or which chat>, <YYYY-MM-DD>`, `- value: <for the
+    user>`, `- cost: <rough % of the week>`, `- reversible: yes | no` and `- status: open | started <YYYY-MM-DD>
+    <thread> | done | dropped (<why>)`.
 22. **On the watcher's backlog prompt** (weekly reset, or far behind pace): pick the most valuable reversible,
     in-budget open item the user would be proud to find started, run it through delegates, set its status and
     report afterwards. Empty backlog: mine the notes file and recent chats for forgotten ideas, propose 3 grounded
