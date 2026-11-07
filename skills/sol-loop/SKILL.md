@@ -60,7 +60,9 @@ it cannot pass, nothing is approved, and you report it as waiting for the missin
 when it is back. Never substitute another model and never pass a round on one review.
 
 Do not edit the work under review while they run. End the turn and follow each completion notice. A chat that is
-itself a child calls `t3_thread_wait` on each critic instead, so its parent is not woken by a waiting turn. If a
+itself a child never ends its turn to wait: it calls `t3_thread_wait` on each critic. In one case T3 did not
+relay the turns a delegate's critic notices started, so its report was not relayed to its parent (one without
+its `done:` word sat unread for 2.2 h). If a
 critic errors, times out or never replies, restart it once with the ledger, then report which critic completed.
 Silence is not approval.
 
