@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `skills/ui-loop`: a UI improvement loop distilled from several runs (owner taste, viewport shots and metrics,
+  a hands-on pass acting as the user, two critics per round with rotating lenses, one implementer, re-measure), with
+  `references/principles.md`, brief templates, and `scripts/ui_shoot.mjs` + `ui_metrics.js` (contrast, taps,
+  overflow, focus rings, console errors per view).
 - `watch.py pace`: per account, weekly use against an even pace (100 % over 7 days), hours to the reset and what to
   do (behind: spare capacity for approved or queued work, near the reset: use what is left, ahead: no optional
   work). The usage check also wakes once per cycle when an account nears its reset with capacity unused

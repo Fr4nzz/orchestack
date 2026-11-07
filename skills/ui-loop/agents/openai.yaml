@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Loop"
+  short_description: "Improve a UI: owner taste, real-size shots, a hands-on pass, two critics with rotating lenses"
+  default_prompt: "Use $ui-loop to improve the UI of this page."
