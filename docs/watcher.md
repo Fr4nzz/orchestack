@@ -53,10 +53,10 @@ quoted array ids such as `'123[4]'` from globbing on either side). A job the loo
 cannot place counts as `GONE` (ended, exit status unknown). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
 plain append).
 
-The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill): pick
-the most valuable reversible, in-budget item the user would be proud to find started, run it through delegates and
-report afterwards. With an empty backlog it proposes 3 ideas grounded in the project's state and starts the best
-reversible one. Irreversible or outward-facing items wait for the user.
+The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill's
+`references/backlog.md`). It picks the most valuable reversible, in-budget item the user would be proud to find
+started, runs it through delegates and reports afterwards. With an empty backlog it proposes 3 ideas grounded in the
+project's state and starts the best reversible one. Irreversible or outward-facing items wait for the user.
 
 Rules: at most one wake per thread per `rate_limit_minutes` (60) except disk and failures, optional `quiet_hours`
 (`{"start": "23:00", "end": "07:00"}` in `timezone`), and held wakes go out merged later. The first run of a check

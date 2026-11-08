@@ -124,7 +124,8 @@ journalctl --user -u orchestack-watch     # what it sent
 days, about 14 % per day) says it should be by now, the hours to its reset and what to do. Behind pace, spend the
 gap on queued work, within a day of the reset use what is left, and ahead of pace start no optional work. Orchestrators
 run it before stopping work for budget, and give lanes pace conditions instead of fixed percentages. The backlog
-prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill).
+prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill's
+`references/backlog.md`).
 
 ## Development
 
