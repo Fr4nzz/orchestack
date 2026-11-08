@@ -24,7 +24,6 @@ incidents that taught each rule, so the skill can stay short.
 |---|---|
 | Leads forward deliverables in the same turn | Two leads sat on finished review pages until the user found them. |
 | A child waits on its own critics inside the turn, sends from unrelayed turns, and starts every report with its word | A delegate ended its turns to wait for its `sol-loop` critics. T3 did not relay the four turns their notices started, and its final report lacked `done:`, so the result sat unread for 2.2 h. |
-| Launch leads for tasks with several long waits | Three multi-step delegates woke their orchestrator once per background step (10 of 11 wakes in 3 h). |
 | Never re-arm a background loop | One child re-armed its loop and woke its orchestrator 12 times overnight. |
 | After a move or restart, confirm every waiting child has a live wake | A child that was "only waiting on the cluster" lost its wake, and its result sat unread for 6.6 h. |
 | Launch long lanes as leads | A 6-day lead ran 293 turns and woke its orchestrator 76 times. As a delegate it could have woken it up to 293 times. The cost moves to the lead's sends: the same lead sent six messages in its first hour. |
