@@ -50,10 +50,10 @@ covering checks and note missing or pre-failing ones in the brief. Do not send w
 
 ## 2. Start the critics
 
-In T3, call `orchestrator_capabilities`, then `delegate_task` once per critic in parallel, with
-`role: "review"`, `mode: "async"` (a child: `"wait"`, below), a new `clientRequestId` per critic per round, and an explicit effort (medium
-by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use `t3_thread_send`,
-`create_threads` or `t3_thread_launch` for review.
+In T3, call `orchestrator_capabilities`, then `delegate_task` once per critic in parallel, with `role: "review"`,
+`mode: "async"` (a child: `"wait"`, below), a new `clientRequestId` per critic per round, and an explicit effort
+(medium by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use
+`t3_thread_send`, `create_threads` or `t3_thread_launch` for review.
 
 Outside T3, use native subagents that actually run each model. If no route runs Sol (or Opus), the round cannot
 pass. Report it as waiting for that critic and rerun it when back. Never substitute another model or pass a round
