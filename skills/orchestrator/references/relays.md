@@ -1,5 +1,8 @@
 # T3 relays and the incidents behind the reporting and waiting rules
 
+Observed on T3 Code as of 8 Nov 2026. Re-check this file when pingdotgg/t3code #28462 (grandchild completions
+reach the parent) and #31856 (Monitor endings relayed) merge, then drop what they fix.
+
 The orchestrator skill states the rules. This file holds how T3 relays turn ends, what is only observed, and the
 incidents that taught each rule, so the skill can stay short.
 

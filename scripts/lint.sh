@@ -31,6 +31,7 @@ def err(msg):
     print("ERROR: " + msg)
 
 skills = sorted(d for d in os.listdir("skills") if os.path.isdir(os.path.join("skills", d)))
+words = json.load(open("scripts/word-budget.json")) if os.path.isfile("scripts/word-budget.json") else {}
 for s in skills:
     p = f"skills/{s}/SKILL.md"
     if not os.path.isfile(p):
@@ -50,6 +51,11 @@ for s in skills:
         err(f"{p}: description longer than 1024 characters")
     if len(lines) > 200 or len(text) > 20000:
         err(f"{p}: {len(lines)} lines, {len(text)} chars, budget is 200 lines and 20,000 chars")
+    n, cap = len(text.split()), words.get(p)
+    if cap is None:
+        err(f"{p}: no word budget, add it to scripts/word-budget.json")
+    elif n > cap:
+        err(f"{p}: {n} words, budget {cap}. Cut, or raise the budget in scripts/word-budget.json on purpose")
     y = f"skills/{s}/agents/openai.yaml"
     if not os.path.isfile(y):
         err(f"{y} missing")

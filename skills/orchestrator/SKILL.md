@@ -83,7 +83,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 11. **Launch leads for long lanes** (only with the user's standing permission in `local.md`, off by default). A
     `t3_thread_launch` child has no completion relay and wakes you only when it sends. With that permission, launch
     any lane expected to take over about 10 turns or a day, or with two or more steps that each wait 10 min or
-    more, after reading `references/leads.md`. One-off tasks and critics stay delegates. Don't wait on or poll a lead. Without the permission, delegate and
+    more, after reading `references/leads.md`. One-off tasks and critics stay delegates. Don't wait on or poll a lead (T3's launch text suggests `t3_thread_wait`): its send wakes you. Without the permission, delegate and
     follow **Reports**, **Long waits** and **Short waits**.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: `bulk-image-review`), results to files and one
     summary back. Before a cluster wave or a repeated fan-out, read **Waves** in `references/operations.md`.
@@ -94,7 +94,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 
 14. **Status checks read each child's live run state** (running, idle, failed, waiting on approval) and each lead's
     latest messages, its workers' `done:` lines included, not only logs or processes. Check a silent child at its
-    projected finish. After an outage, a move to another account or thread, a restart or an expired cluster login,
+    projected finish with `t3_thread_read`, not `task_status`. After an outage, a move to another account or thread, a restart or an expired cluster login,
     follow **Recovery** in `references/operations.md`. Every child waiting on an external job needs a live wake
     again.
 15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
@@ -117,14 +117,14 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     If the watcher, a scheduled wake or your own delegate's completion notice started this turn, or you were launched rather than delegated, send the report (t3_thread_send, mode "queue").
     Otherwise (your task, your parent's message or a background command started the turn), end the turn with the report.
     A deliverable the user is meant to open or review: send "done: <what> <link>, work continues" at once (t3_thread_send, mode "queue") and keep working. One that ends your task is your final report.
-    Wait on your own delegates and critics with t3_thread_wait in the same turn, never by ending your turn.
+    Wait on your own delegates and critics with t3_thread_wait in the same turn, even where a tool result says end your turn: a turn their completion starts does not reach your parent.
     End your turn only with the result, a failure, a real question, the waiting: handoff or the short line of a background wait.
     ```
     Wait block:
     ```
     Most turns you end wake your parent, so wait inside one turn with one shell loop that polls the job or command. It stops with CAP_REACHED after CAP seconds, or PEND_LONG once a job has pended PEND_S seconds. hpcstack's cluster-ops references/monitoring.md has such a loop.
     Under 10 min: one foreground command (Bash timeout 600000, loop CAP=420 PEND_S=300).
-    10 to 45 min: one background command (Bash timeout at least (CAP+180) x 1000 ms, e.g. 3000000) plus t3_background_wait, never re-armed. End that turn with one short line and report in the turn its completion starts.
+    10 to 45 min: one background command (Bash timeout at least (CAP+180) x 1000 ms, e.g. 3000000) plus t3_background_wait (taskIds: [id]), never re-armed, never from a native subagent. End that turn with one short line and report in the turn its completion starts.
     Longer, or if that loop runs out: python3 <orchestack>/watcher/watch.py add --job <id> --next-step "..." --expect-min <runtime> --max-pend-h 3, write a state file (outputs, next step), then end once with waiting: <job ids>. Outside a T3 shell, also pass --thread <your thread id>. No watcher: schedule one wake at the projected finish instead.
     When the watcher wakes you because every job ended or one failed: read the state file, move the job file to the done/ folder next to it, re-add only that file's unfinished jobs (pending ones too) with both limits. Then send done: or failed: (the watcher started this turn), and if you re-added jobs, end with waiting: <their ids>.
     On a straggler or pend-limit wake: keep the job file, act if needed, end with waiting: and send nothing.
