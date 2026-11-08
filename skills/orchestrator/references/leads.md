@@ -15,7 +15,8 @@ the user's request for a new thread that T3's own instructions ask for.
 
 1. Launch with the title `Lead: <lane>`, the project (`projectId`, `workspaceStrategy`), the model and account
    `local.md` names for leads, and a brief with all three blocks under the skill's **Briefs**.
-2. Then run `python3 <orchestack>/watcher/watch.py lead --thread <its threadId>` in your own shell (add
+2. Read it once with `t3_thread_read` to confirm it started (T3's launch text asks for a read or a wait). Then
+   run `python3 <orchestack>/watcher/watch.py lead --thread <its threadId>` in your own shell (add
    `--parent <your id>` where the shell has no `$T3CODE_THREAD_ID`). T3 records no parent for a launched thread,
    and this lead file lets the watcher wake you when the lead fails, is stuck, waits on an approval, or ends a turn
    with a report it never sent.
@@ -26,5 +27,5 @@ the user's request for a new thread that T3's own instructions ask for.
 A launched lead has no completion relay, so its turn ends wake no one. The cost moves to the lead's sends, listed in
 the lead block under **Briefs**. `references/relays.md` has the measured case.
 
-Don't wait on or poll a lead: its send wakes you. Batch what you have for it into its next real task. Its own
-delegates' relays wake the lead, not you.
+After that first read, don't wait on or poll a lead: its send wakes you. Batch what you have for it into its next real
+task. Its own delegates' relays wake the lead, not you.

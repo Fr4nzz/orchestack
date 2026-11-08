@@ -60,8 +60,9 @@ pass. Report it as waiting for that critic and rerun it when back. Never substit
 on one review.
 
 Do not edit the work under review while they run. A top-level chat ends the turn and follows each completion
-notice. A child calls `t3_thread_wait` on each critic instead of ending its turn, because T3 may not relay the
-turns those notices start, which strands its report. If a critic errors, times out or never replies, restart it
+notice. A child starts each critic with `delegate_task` mode "wait" (timeoutMs about the critic's expected time).
+After a timeout it follows `next` and ends the turn, then sends its report from the turn the completion starts,
+because T3 may not relay that turn. If a critic errors, times out or never replies, restart it
 once with the ledger, then report which critic completed. Silence is not approval.
 
 Round 1 brief, the same for both critics (T3 children get no history):
@@ -119,8 +120,8 @@ open ids and changed work only, mark each old id `resolved` or `still open: <rea
 - Shipping needs its usual authorisation. Never push during the loop, and after agreement only if the user asked
   to push, ship or update the PR.
 
-The final reply, and the PR description above the model blurb if you push, carry the score table (as in Theo Browne's tstack
-`council`) of the critics that completed. Write `no score` when one gave none, never invent one.
+The final reply, and the PR description above the model blurb if you push, carry the score table (as in Theo Browne's
+tstack `council`) of the critics that completed. Write `no score` when one gave none, never invent one.
 
 ```markdown
 | Critic | Round 1 | Round 2 |
