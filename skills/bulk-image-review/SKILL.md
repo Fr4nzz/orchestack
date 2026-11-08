@@ -9,10 +9,10 @@ If `~/.config/orchestack/local.md` exists, read it first. Its budget rules overr
 
 ## Why it gets expensive
 
-When the harness keeps opened images in the agent's context, every later step processes them again, so with a
-steady number of steps per image one agent's input grows roughly with the square of the images it has seen. The
-pilot below gives the real cost. Retries (a failed image tool, a re-opened image) multiply it. A large
-chat that reviews screenshots itself pays its whole context on every turn as well.
+When the harness keeps opened images in context, every later step processes them again, so with steady steps per
+image one agent's input grows roughly with the square of the images seen. A pilot gives the real cost. Retries (a
+failed image tool, a re-opened image) multiply it. A large chat that reviews screenshots itself pays its whole
+context on every turn as well.
 
 Measured on one week of real work (cost-weighted tokens from local transcripts):
 

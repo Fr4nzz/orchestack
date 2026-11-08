@@ -19,13 +19,12 @@ of them.
 2. **Name the readers and their main task** on this screen (who decides what, on which device). Every rule below
    is judged against that task.
 3. **Collect the taste evidence you have:** the owner's taste file, one design they liked (screenshot), and the
-   version they rejected (screenshot). Mark any that is missing as unknown and state your provisional design
-   assumptions. Critics get all of it in every round, the blind round included ("blind" means no lessons file).
-   Without it, critics push generic rules against the owner's taste: removing boxes, outlines and brand colours, or
-   shrinking images until they need a click. The owner reversed exactly these changes more than once.
-4. **Budget:** price one round from a pilot (orchestrator skill, "Price work in % of the week from a pilot"). On
-   one site, round 1 measured about 1 % of a week, and rounds 1 to 4 with four implementer passes about 2 % (later
-   rounds were not metered).
+   version they rejected (screenshot). Mark any that is missing as unknown and state your provisional assumptions.
+   Critics get all of it in every round, the blind round included ("blind" means no lessons file). Without it,
+   critics push generic rules against the owner's taste: removing boxes, outlines and brand colours, or shrinking
+   images until they need a click. The owner reversed exactly these changes more than once.
+4. **Budget:** price one round from a pilot (orchestrator skill, **Budget**). On one site, round 1 measured about 1 %
+   of a week, and rounds 1 to 4 with four implementer passes about 2 % (later rounds were not metered).
 5. **Test on a copy.** Pages that write data (review, labelling, forms) run against a copy of the data. Critics
    are told never to click write buttons on a live page. One test run once wrote verdicts into a live store.
 
