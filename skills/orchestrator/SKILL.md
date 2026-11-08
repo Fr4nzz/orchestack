@@ -54,6 +54,10 @@ message, which wakes the parent (**Reports**).
    - **Deliverables at once:** a page, report, figure or draft the user is meant to open or review (not intermediate
      outputs) is a `done:` with its link, sent at once (`t3_thread_send`, mode "queue"), even mid-lane, one per
      deliverable or batch. A lead forwards its workers' deliverables in the same turn.
+   - **Open questions stay in view:** keep each question for the user in `.work/orchestrator/NEEDS_YOU.md` (what,
+     link, since when, what expires) and list the open ones first in every reply to the user until answered. A
+     later message must not bury one. A lead whose only next step waits on the user renames its thread to end
+     with `(waiting on you: <what>)` (`t3_thread_update`) and restores the title when answered.
    - **Progress stays in files:** a notes file (default `.work/orchestrator/NOTES.md`) the lead reads on its next
      real task. Answer a stray progress note in one line or not at all. A turn that only logs progress ends with
      `noted: ...`, a long wait with `waiting: <job ids> ...`. Both end a turn, never send, and wake no one.
@@ -140,7 +144,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     Send your parent <parent id> (t3_thread_send, mode "queue"):
     done: when an ask is finished.
     done: <what> <link> when a page, report, figure or draft the user is meant to open or review is ready (not intermediate outputs), yours or a worker's, even mid-lane, in the same turn.
-    failed: when it fails. decision: or handoff: when you need your parent. Never send progress. It goes in .work/orchestrator/NOTES.md.
+    failed: when it fails. decision: or handoff: when you need your parent. When your only next step waits on the user, also rename this thread to end with (waiting on you: <what>) with t3_thread_update, and restore it when answered. Never send progress. It goes in .work/orchestrator/NOTES.md.
     Start a message with one of those four words only when you also send it. The watcher tells your parent about a report you ended a turn with but never sent, and about a failed or stuck turn.
     ```
 
