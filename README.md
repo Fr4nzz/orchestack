@@ -34,7 +34,7 @@ plan's usage meter) found:
 | Piece | Say or trigger | What it does |
 |---|---|---|
 | `skills/orchestrator` | "you are the orchestrator", "orchestrate this", "work autonomously", "decide for me", "parallelize", "I'm going to sleep", chats titled `Orchestrator:` or `Lead:` | The playbook: parallel lanes via delegates, decide reversible steps, no "want me to...?", pilot pricing, pace, waits, briefs, models. |
-| `skills/sol-loop` | "sol loop", "dual critic", "critic loop" | One review loop with two independent critics per round (GPT Sol + a fresh Opus), smallest fixes, a ledger, a stop rule. |
+| `skills/sol-loop` | "sol loop" | One review loop with two independent critics per round (GPT Sol + a fresh Opus), smallest fixes, a ledger, a stop rule. |
 | `skills/bulk-image-review` | before agents look at many images | Cost model, ask-first threshold, and the small-fresh-worker pattern. |
 | `skills/ui-loop` | "ui loop", "improve the UI" | Owner taste first, shots and metrics at real screen sizes, a hands-on pass acting as the user, two critics per round with rotating lenses, one implementer, re-measure. `scripts/ui_shoot.mjs` shoots and measures each view. |
 | `hooks/role_card.py` | Claude Code `SessionStart` (`startup`, `resume`, `compact`) | Prints a 7-line role card into context for orchestrator and lead chats, so the role survives compaction. |
