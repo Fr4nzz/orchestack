@@ -4,19 +4,70 @@ The README has the overview. This page holds every check, key, default and edge 
 
 ## Checks
 
-Checks, each enabled by its section in `config.json` under `watcher`:
+Each check is enabled by its section in `config.json` under `watcher`. Details for the longer ones follow the table.
 
 | Check | Wakes | When |
 |---|---|---|
-| `jobs` | the thread named in the job file | every job in a job file ended, or one failed (where job files live: below). Also once per job: still running at twice `expect_min` after the watcher first saw it run (a straggler), or still pending `max_pend_h` hours after the file was written. When the owner thread is deleted in T3, its parent (the file's `parent`, the lineage, else the orchestrator) gets one "orphaned jobs <ids> (thread gone)" wake and the file's later wakes |
-| `children` | the child's parent | a T3 child thread's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
+| `jobs` | the thread named in the job file | every job in a job file ended or one failed, a job straggles or pends too long, or the owner thread is gone |
+| `children` | the child's parent | a T3 child's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
-| `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, or usage is `behind_by` points behind `pace_per_day`, or within `use_before_reset_h` (12) of the next `weekly_reset` less than `use_before_reset_below` (90) % is used (once per cycle: what is left is lost at the reset). With several plan accounts, list the others in `accounts`: each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`, and may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours` (otherwise taken from the section). The section then needs an explicit `weekly_pattern` too. Their wakes start with `[name]`. A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert. If the first account cannot be read, the whole check fails and no account is checked that run |
+| `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, usage is behind pace, or unused capacity will be lost at the next reset |
 | `decision` | that orchestrator | a `decision:` message sat unanswered for 30 min while the chat was idle |
-| `decision` | the child's parent | a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, and T3 never relayed it to the parent (the turn was started by an outside send, such as a jobs wake) nor did the child send the parent a message with `t3_thread_send` after it, or a report (`handoff (subject): ...` counts) earlier in that turn, idle for 30 min (`"children": false` turns it off). A relay under the task id of a `t3_thread_send` that started the child's turn counts. `noted:` and `waiting:` never wake the parent, nor does a `handoff:` from a child that owns an open job file |
-| `decision` | the child itself | a child's last message is a `waiting:` that names cluster jobs (`waiting: <ids>`, or `job 4101`, `Job <4101>`) that no job file (open, ended or in `done/`) lists, and the message names no background wait or `Monitor`: wakes the child once, asking it to run `watch.py add` for exactly those jobs |
-| `expiry` | the owner of the oldest open job file, urgent | off unless configured: `command` prints a login's validity and `pattern` captures its end time or the time left in group 1. Runs only while a job file is open (not yet reported as ended), and wakes one thread, the owner of the oldest open job file, once per expiry time (two recipients would start two logins at once), when less than `warn_minutes` (60) are left or the pattern no longer matches (logged out). With no open job file the command does not run. `"only_with_jobs": false` restores the old behaviour: always checked, wakes the orchestrator (or `thread`). E.g. `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}` |
+| `decision` | the child's parent | a child's report never reached the parent |
+| `decision` | the child itself | a child waits on cluster jobs that no job file lists |
+| `expiry` | the owner of the oldest open job file, urgent | a login is about to expire or has expired (off unless configured) |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
+
+### `jobs`
+
+- A job file wakes its thread once when every job in it ended, or when one failed (where job files live: below).
+- A straggler wakes it once per job: still running at twice `expect_min` after the watcher first saw it run.
+- A pending job wakes it once: still pending `max_pend_h` hours after the file was written.
+- When the owner thread is deleted in T3, its parent (the file's `parent`, the lineage, else the orchestrator)
+  gets one "orphaned jobs <ids> (thread gone)" wake and the file's later wakes.
+
+### `usage`
+
+- It wakes when the weekly meter resets, when usage is `behind_by` points behind `pace_per_day`, or once per cycle
+  when, within `use_before_reset_h` (12) of the next `weekly_reset`, less than `use_before_reset_below` (90) % is
+  used (what is left is lost at the reset).
+- Several plan accounts: list the others in `accounts`.
+  - Each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`.
+  - It may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours`. Otherwise they come
+    from the section, which then needs an explicit `weekly_pattern` too.
+  - Their wakes start with `[name]`.
+  - A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert.
+  - If the first account cannot be read, the whole check fails and no account is checked that run.
+
+### `decision` for a child's report
+
+- It fires when a child's last message starts with `decision:`, `done:`, `failed:` or `handoff:`, the child has
+  been idle for 30 min, and the report never reached the parent:
+  - T3 did not relay it (the turn was started by an outside send, such as a jobs wake).
+  - The child did not send the parent a message with `t3_thread_send` after it.
+  - The child did not send a report (`handoff (subject): ...` counts) earlier in that turn.
+- A relay under the task id of a `t3_thread_send` that started the child's turn counts as reaching the parent.
+- `noted:` and `waiting:` never wake the parent, nor does a `handoff:` from a child that owns an open job file.
+- `"children": false` turns this check off.
+
+### `decision` for a waiting child
+
+- It fires when a child's last message is a `waiting:` that names cluster jobs (`waiting: <ids>`, or `job 4101`,
+  `Job <4101>`) that no job file (open, ended or in `done/`) lists, and the message names no background wait or
+  `Monitor`.
+- It wakes the child once, asking it to run `watch.py add` for exactly those jobs.
+
+### `expiry`
+
+- Off unless configured: `command` prints a login's validity, and `pattern` captures its end time or the time left
+  in group 1.
+- It runs only while a job file is open (not yet reported as ended). With no open job file the command does not run.
+- It wakes one thread, the owner of the oldest open job file, once per expiry time, when less than `warn_minutes`
+  (60) are left or the pattern no longer matches (logged out). One recipient only, because two would start two
+  logins at once.
+- `"only_with_jobs": false` restores the old behaviour: always checked, and it wakes the orchestrator (or
+  `thread`).
+- Example: `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}`
 
 ## Job files
 
@@ -73,7 +124,7 @@ T3 records no lineage for a launched lead.
    `$T3CODE_THREAD_ID`, or `--parent`).
 2. That writes `~/.local/state/orchestack/leads/<id>.json`, and the `children` and `decision` checks then treat
    the lead as that parent's child.
-3. When the lane is done, `--remove` deletes it.
+3. When the lane is done, the parent runs `watch.py lead --thread <lead id> --remove`.
 
 ### Job states from the cluster
 
@@ -116,7 +167,8 @@ project's state and starts the best reversible one. Irreversible or outward-faci
 ## Rules
 
 - At most one wake per thread per `rate_limit_minutes` (60), except disk and failures.
-- Optional `quiet_hours` (`{"start": "23:00", "end": "07:00"}` in `timezone`). Held wakes go out merged later.
+- Optional `quiet_hours` (`{"start": "23:00", "end": "07:00"}` in `timezone`).
+- Wakes held by the rate limit or quiet hours go out merged later.
 - The first run of a check (jobs, children, decision and the behind-pace part of usage) records what already
   exists without waking, and only counts as done once it succeeded. Disk alerts even on the first run.
 - On that first run, job files older than 14 days are taken as handled (the woken chat moves its file to

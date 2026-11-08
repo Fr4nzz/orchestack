@@ -150,10 +150,10 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 
 ## Models and review
 
-18. **Use the pinned default model at a chosen effort:** medium for routine steps, high for hard ones, never low
-    for Claude models, never max by default. Only the user changes pinned models (suggest, never switch). A mid-tier model at medium effort
-    suits well-specified work, a small one only read-only scouting, script-verified results or a calibrated image
-    first pass (`bulk-image-review`), never final judgement.
+18. **Use the pinned default model at a chosen effort:** medium for routine steps, high for hard ones, never low for
+    Claude models, never max by default. Only the user changes pinned models (suggest, never switch). A mid-tier
+    model at medium effort suits well-specified work, a small one only read-only scouting, script-verified results
+    or a calibrated image first pass (`bulk-image-review`), never final judgement.
 19. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
     independent reviews per round (GPT Sol and a fresh Opus).
 

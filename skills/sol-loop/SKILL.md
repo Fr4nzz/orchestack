@@ -1,6 +1,6 @@
 ---
 name: sol-loop
-description: Review work with two independent critics per round and make the smallest fixes. Use when the user says "sol loop", and before shipping code, writing, an analysis or a UI change that should get independent review.
+description: Review work with two independent critics per round and make the smallest fixes. Use when the user says "sol loop" and before shipping code, writing, an analysis or a UI change that should get independent review.
 ---
 
 # sol-loop (two critics)
