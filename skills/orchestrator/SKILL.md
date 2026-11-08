@@ -72,18 +72,11 @@ message, which wakes the parent (**Reports**).
 
 Before `watch.py add` or a background wait, read `references/waits.md`.
 
-8. **Long waits (over about 45 min) take precedence over everything below.** Scheduler jobs wait
-   on the short path until they run or about 20 min pass. Then `watch.py add` them with both limits, write a state
-   file and end with `waiting:` plus the job ids. The watcher wakes you once when every job ended or one failed
-   (without it, schedule ONE wake at the projected finish). Then report `done:` or `failed:`. After a straggler or
-   pend-limit wake, end with `waiting:` again.
-9. **Short waits (under about 45 min) keep turn ends few,** because each relayed one wakes the parent (`CAP` and
-   `PEND_S` are defined in the wait block under **Briefs**).
-   - Under 10 min: one blocking foreground command (Bash `timeout` 600000, `CAP=420`). Codex: the same within
-     its tool timeout, never a series of `sleep` calls.
-   - 10 to 45 min: ONE background command plus `t3_background_wait`, never re-armed (each re-arm adds relays). End
-     that turn with one short line and report in the turn the completion starts.
-   - Over 45 min, or if the loop prints `CAP_REACHED` or `PEND_LONG`: **Long waits**.
+8. **Long waits (over about 45 min) take precedence over everything below.** Scheduler jobs wait on the short path
+   until they run or about 20 min pass, then follow the watcher steps of the wait block under **Briefs**.
+9. **Short waits (under about 45 min) keep turn ends few,** because each relayed one wakes the parent. Follow the
+   wait block's sizes. Codex: the same within its tool timeout, never a series of `sleep` calls. Never re-arm a
+   background wait (each re-arm adds relays).
 10. **Use the orchestack watcher, not AI scheduled checks.** It runs every 15 min without a model and wakes a chat
     only when something changed (the README lists the checks). No recurring AI schedules, except a one-off wake at
     a projected finish the watcher cannot see (record its id, delete it when the work settles).
@@ -133,7 +126,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     Under 10 min: one foreground command (Bash timeout 600000, loop CAP=420 PEND_S=300).
     10 to 45 min: one background command (Bash timeout at least (CAP+180) x 1000 ms, e.g. 3000000) plus t3_background_wait, never re-armed. End that turn with one short line and report in the turn its completion starts.
     Longer, or if that loop runs out: python3 <orchestack>/watcher/watch.py add --job <id> --next-step "..." --expect-min <runtime> --max-pend-h 3, write a state file (outputs, next step), then end once with waiting: <job ids>. Outside a T3 shell, also pass --thread <your thread id>. No watcher: schedule one wake at the projected finish instead.
-    When the watcher wakes you because every job ended or one failed: read the state file, move the job file to the done/ folder next to it, re-add only that file's unfinished jobs (pending ones too) with both limits, then report.
+    When the watcher wakes you because every job ended or one failed: read the state file, move the job file to the done/ folder next to it, re-add only that file's unfinished jobs (pending ones too) with both limits. Then send done: or failed: (the watcher started this turn), and if you re-added jobs, end with waiting: <their ids>.
     On a straggler or pend-limit wake: keep the job file, act if needed, end with waiting: and send nothing.
     ```
     For a launched lead (**Launch leads**), add the wait block and this one, with your thread id:
