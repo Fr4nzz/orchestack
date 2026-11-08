@@ -22,7 +22,7 @@ A job file is what a chat writes before it ends its turn on a long wait:
 project and without looking up an id, is the `add` command:
 
 ```bash
-python3 ~/src/orchestack/watcher/watch.py add --job 4711 --job 4712 --next-step "read .work/state.md"
+python3 ~/src/orchestack/watcher/watch.py add --job 4711 --job 4712 --next-step "read .work/state.md" --expect-min 90 --max-pend-h 3
 ```
 
 It writes `~/.local/state/orchestack/jobs/4711.json` (`--name` sets the name, `--dir` another directory,
