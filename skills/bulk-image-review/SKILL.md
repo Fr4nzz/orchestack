@@ -1,6 +1,6 @@
 ---
 name: bulk-image-review
-description: Use when an agent itself must look at many images (label or ground-truth review, transcription of photos, notebooks or envelopes, checking model outputs, curating crops, screenshot or slide audits). Read BEFORE launching image-reading agents.
+description: Plan cheap agent review of many images. Use when an agent itself must look at many images (label or ground-truth review, transcription of photos, notebooks or envelopes, checking model outputs, curating crops, screenshot or slide audits). Read BEFORE launching image-reading agents.
 ---
 
 # Bulk image review, cheaply
@@ -9,10 +9,10 @@ If `~/.config/orchestack/local.md` exists, read it first. Its budget rules overr
 
 ## Why it gets expensive
 
-When the harness keeps opened images in context, every later step processes them again, so with steady steps per
-image one agent's input grows roughly with the square of the images seen. A pilot gives the real cost. Retries (a
-failed image tool, a re-opened image) multiply it. A large chat that reviews screenshots itself pays its whole
-context on every turn as well.
+When the harness keeps opened images in context, every later step processes them again. With a fixed number of
+steps per image, one agent's cumulative input across calls grows roughly with the square of the images seen. A
+pilot gives the real cost. Retries (a failed image tool, a re-opened image) multiply it. A large chat reviewing
+screenshots itself also pays its whole context every turn.
 
 Measured on one week of real work (cost-weighted tokens from local transcripts):
 
@@ -26,8 +26,8 @@ Measured on one week of real work (cost-weighted tokens from local transcripts):
 
 Follow the budget rule in the `orchestrator` skill: price from a measured pilot, not from token estimates. Run one
 small batch (one agent, about 25 items) yourself, read the usage meter before and after, and scale to the whole
-job. Ask the user only if that measured price for the whole job is above the ask threshold and not yet approved.
-The per-item figures above are only a sanity check on the pilot.
+job. Ask the user only if that measured price is above the ask threshold and not yet approved. The per-item
+figures above only sanity-check the pilot.
 
 ## Patterns that worked
 
@@ -46,8 +46,8 @@ The per-item figures above are only a sanity check on the pilot.
    redone. The coordinating chat reads the files, never the images, and does not re-type the readings.
 6. **Tiny replies.** Agents answer only "rows written, how many unsure, problems". Tools return only the items that
    need a look, merge identical findings, and truncate raw text.
-7. **Blind and anonymous items** (anonymised names, no access to model outputs), so the review is independent. This
-   is also cheaper, because the agent doesn't go searching.
+7. **Blind and anonymous items** (anonymised names, no access to model outputs), so the review is independent and
+   cheaper, because the agent doesn't go searching.
 8. **Human confirmation on a sample.** In the transcription job the user checked 40 of 300 items, found no corrections,
    and accepted the rest.
 
