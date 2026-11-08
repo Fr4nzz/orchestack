@@ -12,15 +12,8 @@ Read it before `watch.py add` and before a background wait of 10 to 45 min. The 
    <runtime> --max-pend-h <e.g. 3>`. Always pass both limits. Without them the watcher sends no straggler or pending
    wake. The command works from any project and takes the thread id from `$T3CODE_THREAD_ID` (outside a T3 shell, pass
    `--thread <id>`, see `docs/watcher.md` in the repo).
-3. Write a state file (outputs, next step) and end the turn with `waiting:` plus the job ids.
-4. The watcher wakes that thread once when every job ended or one failed. Without the watcher, schedule ONE wake
-   at the projected finish.
-5. At that wake, read the state file, move the job file to the `done/` folder next to it and report `done:` or
-   `failed:` (a child sends it with `t3_thread_send`, mode "queue").
-6. On a straggler or pend-limit wake, keep the open job file, act if needed and end with `waiting:`, sending
-   nothing.
-7. After a one-failed wake, re-add the survivors (only unfinished jobs from the file you moved to `done/`, pending
-   ones too) with both limits.
+3. Then follow the watcher lines of the wait block under **Briefs** (state file, `waiting:`, each kind of wake,
+   the no-watcher fallback). A top-level chat reports to the user instead of sending.
 
 Why not one long background wait instead: a background wait that times out after 2 h returns to an expired cache.
 

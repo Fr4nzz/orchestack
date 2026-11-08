@@ -51,7 +51,7 @@ covering checks and note missing or pre-failing ones in the brief. Do not send w
 ## 2. Start the critics
 
 In T3, call `orchestrator_capabilities`, then `delegate_task` once per critic in parallel, with
-`role: "review"`, `mode: "async"`, a new `clientRequestId` per critic per round, and an explicit effort (medium
+`role: "review"`, `mode: "async"` (a child: `"wait"`, below), a new `clientRequestId` per critic per round, and an explicit effort (medium
 by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use `t3_thread_send`,
 `create_threads` or `t3_thread_launch` for review.
 
@@ -61,9 +61,10 @@ on one review.
 
 Do not edit the work under review while they run. A top-level chat ends the turn and follows each completion
 notice. A child starts each critic with `delegate_task` mode "wait" (timeoutMs about the critic's expected time).
-After a timeout it follows `next` and ends the turn, then sends its report from the turn the completion starts,
-because T3 may not relay that turn. If a critic errors, times out or never replies, restart it
-once with the ledger, then report which critic completed. Silence is not approval.
+When the wait returns without a result, it follows `next`: it ends the turn with `waiting: critics` (no ids) and sends
+its report from the turn the completion starts, because T3 may not relay that turn. A wait timeout is not a
+failure, so restart nothing. If a critic errors or never replies, cancel it and restart it once with the ledger,
+then report which critic completed. Silence is not approval.
 
 Round 1 brief, the same for both critics (T3 children get no history):
 
