@@ -22,7 +22,7 @@ Keep it out of any repo.
 ## Orchestrators
 - Main orchestrator thread: `mcp:<thread id>` (project: web shop). Lead: `mcp:<thread id>` (project: mobile app).
 - Never compact or replace an orchestrator. The user does that.
-- `t3_thread_launch` for leads on long lanes (rule 11): not permitted (opt-in only). To permit it, write who
+- `t3_thread_launch` for leads ("Launch leads for long lanes"): not permitted (opt-in). To permit it, write who
   granted it and when, e.g. "permitted (the user, 2026-01-05)".
 
 ## Cluster
