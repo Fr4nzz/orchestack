@@ -25,7 +25,7 @@ them. Be careful of scope creep and don't be scared to push back.
 
 - 2 rounds per unit by default. A third only for security, permissions, auth, data loss or state and concurrency,
   while a blocker or should stays open with evidence, or when the user asks.
-- **Score bar** (as in Theo Browne's tstack `council`): stop when every critic scores at least 9/10 *(default)*
+- **Score bar:** stop when every critic scores at least 9/10 *(default)*
   with no blocker open, or the budget ends. A score is the confidence the work earns, not a comment count. Scores
   are noisy (Sol scored about 0.5 above Opus), so judge by the lowest. If a round does not raise it, rethink the
   approach first. Declined nits and comment, doc or format-only fixes need no round.
@@ -119,8 +119,8 @@ open ids and changed work only, mark each old id `resolved` or `still open: <rea
 - Shipping needs its usual authorisation. Never push during the loop, and after agreement only if the user asked
   to push, ship or update the PR.
 
-The final reply, and the PR description above the model blurb if you push, carry the score table of the critics
-that completed. Write `no score` when one gave none, never invent one.
+The final reply, and the PR description above the model blurb if you push, carry the score table (as in Theo Browne's tstack
+`council`) of the critics that completed. Write `no score` when one gave none, never invent one.
 
 ```markdown
 | Critic | Round 1 | Round 2 |

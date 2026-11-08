@@ -29,7 +29,7 @@ largest visible gain, and name the file and selector or component.
 
 Score /10 (one decimal) per category: typography, hierarchy, spacing and density, colour and contrast,
 consistency, clarity of actions, phone, dark mode. Then each page. Low scores need evidence.
-Then one overall score: 10 ship as is, 9 only nits left, 7-8 shoulds open, 5-6 a blocker or a wrong approach,
+Then one overall whole-number score: 10 ship as is, 9 only nits left, 7-8 shoulds open, 5-6 a blocker or a wrong approach,
 4 or less the change does not meet its intent. Score the confidence the work earns, not the number of comments.
 blocker = broken or misleading. should = a real problem readers or the owner will notice. nit = polish.
 Reply:
