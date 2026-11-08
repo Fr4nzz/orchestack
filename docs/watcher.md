@@ -2,6 +2,8 @@
 
 The README has the overview. This page holds every check, key, default and edge case.
 
+## Checks
+
 Checks, each enabled by its section in `config.json` under `watcher`:
 
 | Check | Wakes | When |
@@ -16,59 +18,121 @@ Checks, each enabled by its section in `config.json` under `watcher`:
 | `expiry` | the owner of the oldest open job file, urgent | off unless configured: `command` prints a login's validity and `pattern` captures its end time or the time left in group 1. Runs only while a job file is open (not yet reported as ended), and wakes one thread, the owner of the oldest open job file, once per expiry time (two recipients would start two logins at once), when less than `warn_minutes` (60) are left or the pattern no longer matches (logged out). With no open job file the command does not run. `"only_with_jobs": false` restores the old behaviour: always checked, wakes the orchestrator (or `thread`). E.g. `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}` |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
 
+## Job files
+
 A job file is what a chat writes before it ends its turn on a long wait:
-`{"thread": "<owner thread id>", "parent": "<owner's parent thread id>", "jobs": ["4711", "4712"], "next_step":
-"read results/metrics.json"}` (`jobs` defaults to the file name, `parent` is optional). The simplest way, from any
-project and without looking up an id, is the `add` command:
+
+```json
+{"thread": "<owner thread id>", "parent": "<owner's parent thread id>", "jobs": ["4711", "4712"], "next_step": "read results/metrics.json"}
+```
+
+`jobs` defaults to the file name, and `parent` is optional.
+
+### Write one with `add`
+
+The simplest way, from any project and without looking up an id:
 
 ```bash
 python3 ~/src/orchestack/watcher/watch.py add --job 4711 --job 4712 --next-step "read .work/state.md" --expect-min 90 --max-pend-h 3
 ```
 
-It writes `~/.local/state/orchestack/jobs/4711.json` (`--name` sets the name, `--dir` another directory,
-`--force` replaces a file of that name, `--expect-min N` and `--max-pend-h H` add the straggler and pending
-limits) with the thread taken from `$T3CODE_THREAD_ID`, which T3 sets in the shell
-of every chat, delegates included. Outside a T3 shell pass `--thread <id>`: the T3 tool `orchestrator_capabilities`
-returns the calling chat's own id as `parentThreadId` (the parent its delegates would get). `--parent` is optional:
-the watcher reads the parent from the thread's lineage. A chat that moves to another thread (e.g. to another account)
-writes a new job file with its new id. The watcher reads job files, non-recursively (so `jobs/done/` is never read), from:
-each configured project's `.work/orchestrator/jobs/`, each directory in `jobs.dirs`, the shared
-`~/.local/state/orchestack/jobs/` (`$ORCHESTACK_STATE_DIR/jobs`), and every match of `jobs.globs` (e.g.
-`"~/code/*/.work/orchestrator/jobs"`, where a matched directory means its `*.json`). A file reached twice counts once.
-After the wake, the chat moves its file to `done/` next to it. T3 does not tell a parent
-when a turn started by an outside send ends, so the wake tells a child owner to send its result to its parent with
-`t3_thread_send` (mode "queue"), naming the parent from `parent` or else from the thread's lineage. T3 records no
-lineage for a launched lead, so its parent runs `watch.py lead --thread <lead id>` right after the launch (the parent
-comes from `$T3CODE_THREAD_ID`, or `--parent`). It writes `~/.local/state/orchestack/leads/<id>.json`, and the
-`children` and `decision` checks then treat the lead as that parent's child. `--remove` deletes it when the lane is
-done. `jobs.command` lists job states, one `<jobid> <state>` per line, e.g. for LSF over ssh:
-`["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]`. The command runs only while a job
-file is open, and a failed command decides nothing. "No job found" counts as an empty listing. Once the cluster
-answers, a job it no longer lists has ended (one never listed gets `missing_grace_minutes`, 30, from the file's
-time). Finished jobs drop out of `bjobs -a` within hours, so after an outage `jobs.lookup_command` (optional,
-`{jobs}` = the ids, `lookup_timeout_s` 180) asks how those jobs ended, in the same `<jobid> <state>` form. For LSF,
-`watcher/lsf_job_states.sh` tries `bjobs -a`, then `bacct -l`, then `bhist -l` over the last 10 event files:
-`"ssh cluster-login \"bash -l -s -- {jobs}\" < ~/src/orchestack/watcher/lsf_job_states.sh"` (double quotes keep the
-quoted array ids such as `'123[4]'` from globbing on either side). A job the lookup
-cannot place counts as `GONE` (ended, exit status unknown). An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a
-plain append).
+This writes `~/.local/state/orchestack/jobs/4711.json`.
+
+- `--name` sets the name, `--dir` another directory, and `--force` replaces a file of that name.
+- `--expect-min N` and `--max-pend-h H` add the straggler and pending limits.
+- The thread comes from `$T3CODE_THREAD_ID`, which T3 sets in the shell of every chat, delegates included.
+- Outside a T3 shell, pass `--thread <id>`. The T3 tool `orchestrator_capabilities` returns the calling chat's
+  own id as `parentThreadId` (the parent its delegates would get).
+- `--parent` is optional: the watcher reads the parent from the thread's lineage.
+- A chat that moves to another thread (e.g. to another account) writes a new job file with its new id.
+
+### Where the watcher reads them
+
+Non-recursively (so `jobs/done/` is never read), from:
+
+- each configured project's `.work/orchestrator/jobs/`
+- each directory in `jobs.dirs`
+- the shared `~/.local/state/orchestack/jobs/` (`$ORCHESTACK_STATE_DIR/jobs`)
+- every match of `jobs.globs` (e.g. `"~/code/*/.work/orchestrator/jobs"`, where a matched directory means its
+  `*.json`)
+
+A file reached twice counts once.
+
+### After the wake
+
+- The chat moves its file to `done/` next to it.
+- T3 does not tell a parent when a turn started by an outside send ends. So the wake tells a child owner to send
+  its result to its parent with `t3_thread_send` (mode "queue"), naming the parent from `parent` or else from
+  the thread's lineage.
+
+### Leads
+
+T3 records no lineage for a launched lead.
+
+1. Right after the launch, the parent runs `watch.py lead --thread <lead id>` (the parent comes from
+   `$T3CODE_THREAD_ID`, or `--parent`).
+2. That writes `~/.local/state/orchestack/leads/<id>.json`, and the `children` and `decision` checks then treat
+   the lead as that parent's child.
+3. When the lane is done, `--remove` deletes it.
+
+### Job states from the cluster
+
+`jobs.command` lists job states, one `<jobid> <state>` per line. For LSF over ssh:
+
+```json
+["ssh", "cluster-login", "bash -lc 'bjobs -a -o \"jobid stat\" -noheader'"]
+```
+
+- The command runs only while a job file is open, and a failed command decides nothing.
+- "No job found" counts as an empty listing.
+- Once the cluster answers, a job it no longer lists has ended. A job never listed gets
+  `missing_grace_minutes` (30) from the file's time.
+
+Finished jobs drop out of `bjobs -a` within hours. So after an outage, the optional `jobs.lookup_command` asks
+how those jobs ended, in the same `<jobid> <state>` form (`{jobs}` = the ids, `lookup_timeout_s` 180).
+
+- For LSF, `watcher/lsf_job_states.sh` tries `bjobs -a`, then `bacct -l`, then `bhist -l` over the last 10
+  event files:
+
+  ```json
+  "ssh cluster-login \"bash -l -s -- {jobs}\" < ~/src/orchestack/watcher/lsf_job_states.sh"
+  ```
+
+  The double quotes keep quoted array ids such as `'123[4]'` from globbing on either side.
+- A job the lookup cannot place counts as `GONE` (ended, exit status unknown).
+
+## Hosts
+
+An `on_online` command can run again after every outage, so make it idempotent (e.g. `rsync`, not a plain
+append).
+
+## Backlog
 
 The backlog prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill's
 `references/backlog.md`). It picks the most valuable reversible, in-budget item the user would be proud to find
 started, runs it through delegates and reports afterwards. With an empty backlog it proposes 3 ideas grounded in the
 project's state and starts the best reversible one. Irreversible or outward-facing items wait for the user.
 
-Rules: at most one wake per thread per `rate_limit_minutes` (60) except disk and failures, optional `quiet_hours`
-(`{"start": "23:00", "end": "07:00"}` in `timezone`), and held wakes go out merged later. The first run of a check
-(jobs, children, decision and the behind-pace part of usage) records what already exists without waking, and only
-counts as done once it succeeded. Disk alerts even on the first run. On that first run, job files older than 14 days are taken as
-handled (the woken chat moves its file to `jobs/done/`). A check that keeps failing (an expired cluster login, a T3 schema change
-without the needed indexes, a broken usage command) wakes the orchestrator once after `fail_alert_minutes` (120).
-Undelivered wakes retry with a backoff and are dropped, with a loud log line, only after 24 h. The T3 database is opened read-only and read by indexed columns only: before a check runs, `EXPLAIN QUERY PLAN`
-must show no scan of a big table, or the check is skipped.
+## Rules
 
-How it wakes a chat: the T3 CLI, `t3 thread send --base-dir <t3_home> <thread> -` (the message on stdin, and a busy
-chat gets it as its next turn). With `t3_home` set, the watcher runs the T3 version named in
-`<t3_home>/runtime/service-state.json`, so a `t3` on `PATH` from an older install is not used. For a thread that
-has a webhook scheduled task (prompt `{{body.text}}`), put its URL in `wake.webhooks` and the watcher POSTs
-`{"text": ...}` there instead. The URL holds a token: keep it in `config.json` only, never in a repo or a log.
+- At most one wake per thread per `rate_limit_minutes` (60), except disk and failures.
+- Optional `quiet_hours` (`{"start": "23:00", "end": "07:00"}` in `timezone`). Held wakes go out merged later.
+- The first run of a check (jobs, children, decision and the behind-pace part of usage) records what already
+  exists without waking, and only counts as done once it succeeded. Disk alerts even on the first run.
+- On that first run, job files older than 14 days are taken as handled (the woken chat moves its file to
+  `jobs/done/`).
+- A check that keeps failing (an expired cluster login, a T3 schema change without the needed indexes, a broken
+  usage command) wakes the orchestrator once after `fail_alert_minutes` (120).
+- Undelivered wakes retry with a backoff and are dropped, with a loud log line, only after 24 h.
+- The T3 database is opened read-only and read by indexed columns only. Before a check runs,
+  `EXPLAIN QUERY PLAN` must show no scan of a big table, or the check is skipped.
+
+## How it wakes a chat
+
+- Through the T3 CLI: `t3 thread send --base-dir <t3_home> <thread> -`, with the message on stdin. A busy chat
+  gets it as its next turn.
+- With `t3_home` set, the watcher runs the T3 version named in `<t3_home>/runtime/service-state.json`, so a `t3`
+  on `PATH` from an older install is not used.
+- For a thread that has a webhook scheduled task (prompt `{{body.text}}`), put its URL in `wake.webhooks` and the
+  watcher POSTs `{"text": ...}` there instead. The URL holds a token: keep it in `config.json` only, never in a
+  repo or a log.
