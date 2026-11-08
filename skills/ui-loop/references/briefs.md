@@ -1,6 +1,6 @@
 # Brief templates
 
-Fill the angle brackets. Keep each brief in a file in the round's folder so the next round can cite it.
+Fill the angle brackets. Keep each brief in the round's folder so the next round can cite it.
 
 ## Critic brief (same for both critics in a round)
 
@@ -9,7 +9,7 @@ Review only. Do not edit, commit, push, deploy, send anything, click buttons tha
 Scratch files only in <round folder>/<critic>/.
 
 What: <page or app, one line on what it is>. Repo <path> (branch <branch>). Live build: <URL> (pages: <list>).
-You may open it with Playwright to check hover, focus, dark mode, a width or the lightbox.
+You may open it with Playwright for hover, focus, dark mode, a width or the lightbox.
 Shots for this round: <folder> (viewport shots at 1366x768 and 1440x900 light and dark, 390x844 light and dark,
 per language; full-page shots in full/). Metrics: <folder>/metrics.md (contrast, taps, overflow, focus, names).
 Readers and their main task: <who, on which device, deciding or doing what>.
@@ -32,7 +32,7 @@ consistency, clarity of actions, phone, dark mode. Then each page, then overall.
 blocker = broken or misleading. should = a real problem readers or the owner will notice. nit = polish.
 Reply:
 CATEGORIES: ...   PAGES: ...   OVERALL: x
-GRADE: A-F   VERDICT: APPROVE or CHANGES
+VERDICT: APPROVE or CHANGES   UNMET: <pass bars or none>
 F1 [blocker|should|nit] <page/shot or file:selector> <claim>. Evidence. Fix (smallest change).
 Up to 15 findings, stable ids.
 ```

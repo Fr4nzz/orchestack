@@ -1,6 +1,6 @@
 ---
 name: ui-loop
-description: Use when the user says "ui loop", "ui-loop", "improve the UI", "polish the design" or "hill-climb the design" of a web page, app view, poster, slide or other visual, or asks to make a page easier to use. Runs a measured improvement loop. The owner's taste comes first. Then evidence at real screen sizes, a hands-on pass in the browser acting as the user, and rounds of two independent critics with rotating lenses. One implementer applies the triaged fixes, and the result is re-measured and shown to the owner.
+description: Use when the user says "ui loop", "ui-loop", "improve the UI", "polish the design" or "hill-climb the design" of a web page, app view, poster, slide or other visual, or asks to make a page easier to use.
 ---
 
 # ui-loop
@@ -18,12 +18,14 @@ of them.
    ("the key decision is visible without scrolling at 1366x768", "no internal field names on cards").
 2. **Name the readers and their main task** on this screen (who decides what, on which device). Every rule below
    is judged against that task.
-3. **Collect the taste evidence:** the owner's taste file, one design they liked (screenshot), and the version they
-   rejected (screenshot). Critics get all three in every round, the blind round included ("blind" means no lessons
-   file). Without them, critics push generic rules against the owner's taste: removing boxes, outlines and brand colours, or shrinking images until they need a click. The owner
-   reversed exactly these changes more than once.
-4. **Budget:** price one round from a pilot (orchestrator rule 1). On one site, round 1 measured about 1 % of a
-   week, and rounds 1 to 4 with four implementer passes about 2 % (later rounds were not metered).
+3. **Collect the taste evidence you have:** the owner's taste file, one design they liked (screenshot), and the
+   version they rejected (screenshot). Mark any that is missing as unknown and state your provisional design
+   assumptions. Critics get all of it in every round, the blind round included ("blind" means no lessons file).
+   Without it, critics push generic rules against the owner's taste: removing boxes, outlines and brand colours, or
+   shrinking images until they need a click. The owner reversed exactly these changes more than once.
+4. **Budget:** price one round from a pilot (orchestrator skill, "Price work in % of the week from a pilot"). On
+   one site, round 1 measured about 1 % of a week, and rounds 1 to 4 with four implementer passes about 2 % (later
+   rounds were not metered).
 5. **Test on a copy.** Pages that write data (review, labelling, forms) run against a copy of the data. Critics
    are told never to click write buttons on a live page. One test run once wrote verdicts into a live store.
 
@@ -61,7 +63,7 @@ Act as the target user, in a real headless browser, on the copy of the data:
 
 Each round runs `sol-loop`: GPT Sol and a fresh Opus, in parallel, with the same brief (`references/briefs.md`),
 review only. They get the shots, the metrics, the taste evidence, the pass bars and the live URL (Playwright
-allowed for hover, focus, widths and the lightbox). They score each category /10, grade A-F, and list up to 15
+allowed for hover, focus, widths and the lightbox). They score each category /10 and list up to 15
 findings (blocker, should or nit), each with evidence and the smallest fix. Never tell critics a target score.
 
 Rounds follow sol-loop's budget (2 by default, a third or more when the owner asks or a blocker stays open). Pick
@@ -107,7 +109,7 @@ Notes:
 - Re-shoot and re-run metrics, and compare with `before/` (e.g. "text under 4.5:1: 3,060 to 87"). Check the
   console is clean, there is no sideways scroll at 360 and 390, and focus is visible. Re-run the hands-on task
   timing.
-- Show the owner at once (orchestrator rule 7): the live link and a before/after page or annotated pairs, sent as
+- Show the owner at once (orchestrator skill, **Reports**): the live link and a before/after page or annotated pairs, sent as
   `done: <what> <link>` the moment it is up, not at the end of the lane.
 - Next round: a new lens (a full review) or a re-check of fixes (open ids plus changed work), always with fresh
   critics. A fresh critic also catches what an earlier round missed.
@@ -139,4 +141,4 @@ Notes:
 - Components re-implemented per page (cards that look clickable but are not). One shared contract, checked by
   the build.
 - Too many app instances and browsers at once. Close each headless browser after its batch, and check free memory
-  first (orchestrator rule 13).
+  first (orchestrator skill, "Memory, not the number of agents, is the limit").
