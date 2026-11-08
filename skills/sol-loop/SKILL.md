@@ -1,6 +1,6 @@
 ---
 name: sol-loop
-description: Use when the user says "sol loop", "dual critic", "critic loop" or "get critics", and before shipping code, writing, an analysis or a UI change that should get independent review. Runs two independent critics per round (GPT Sol from the other vendor plus a fresh Opus) and makes the smallest changes that satisfy them.
+description: Use when the user says "sol loop", "dual critic", "critic loop" or "get critics", and before shipping code, writing, an analysis or a UI change that should get independent review.
 ---
 
 # sol-loop (two critics)
@@ -13,9 +13,9 @@ them. Be careful of scope creep and don't be scared to push back.
 
 ## Critics
 
-- **Always two reviews per round:** GPT Sol (other vendor) and a fresh Opus that shares none of your context. They
-  behave like different reviewers and find different mistakes, so every round uses both, even for a small
-  revision. Scale the scope instead: a small revision gets both critics on the diff or the changed sections only.
+- **Always two reviews per round:** GPT Sol and Opus, each in a fresh context with the same brief and sources but
+  without your reasoning or the other critic's findings. They behave like different reviewers and find different
+  mistakes, so every round uses both, even for a small revision. Scale the scope instead: a small revision gets both critics on the diff or the changed sections only.
 - **Applies to code, writing, analyses, plots and UI.** For code, accept a fix from either critic only after the tests
   or checks pass with it.
 - **Models:** use the pinned ids from `local.md`. Without a pin, pick the current Sol and Opus from
@@ -28,8 +28,8 @@ them. Be careful of scope creep and don't be scared to push back.
 - Extend to 3 only for security, permissions, auth, data loss or state and concurrency, while a blocker or should
   stays open with evidence, or when the user asks.
 - Stop early when both critics return only nits. Declined nits and comment, doc or format-only fixes need no round.
-- Keep a ledger: unit, round, critic (sol or opus), id, severity, outcome, reason, usage if returned. Never guess
-  usage.
+- Keep a ledger: models and diff size per round, unit, round, critic (sol or opus), id, severity, outcome,
+  reason, usage if returned. Never guess usage.
 
 ## 1. Scope
 
@@ -59,12 +59,10 @@ Outside T3, use native subagents that actually run each model. If no route runs 
 it cannot pass, nothing is approved, and you report it as waiting for the missing critic and rerun that critic
 when it is back. Never substitute another model and never pass a round on one review.
 
-Do not edit the work under review while they run. End the turn and follow each completion notice. A chat that is
-itself a child never ends its turn to wait: it calls `t3_thread_wait` on each critic. In one case T3 did not
-relay the turns a delegate's critic notices started, so its report was not relayed to its parent (one without
-its `done:` word sat unread for 2.2 h). If a
-critic errors, times out or never replies, restart it once with the ledger, then report which critic completed.
-Silence is not approval.
+Do not edit the work under review while they run. A top-level chat ends the turn and follows each completion
+notice. A child never ends its turn to wait: it calls `t3_thread_wait` on each critic, because T3 may not relay the
+turns those notices start, so its report may never reach its parent. If a critic errors, times out or never
+replies, restart it once with the ledger, then report which critic completed. Silence is not approval.
 
 Round 1 brief, the same for both critics (neither sees the other, and T3 children get no history):
 
@@ -76,10 +74,11 @@ Checks: <tests or checks run, results, gaps>  Sources to check against: <tracked
 Ground truth: <independent checks or reference figures to check against, or "none": say what you cannot verify>
 Read the surrounding code or text. Find bugs, broken callers, wrong or misleading claims, mismatch with intent.
 Hold to the smallest change that meets the intent. Flag code, text or guards the intent does not need.
-Other paths, rare cases, small perf, extra compat and style: nits.
+Other paths, rare cases, small perf, extra compat and anything outside the intent: nits. Rank in-scope style
+by its effect on the reader or user.
 blocker = wrong or misleading for the intended case or reader. should = a real problem they will hit. nit = rest.
 Reply:
-GRADE: A-F   VERDICT: APPROVE or CHANGES
+VERDICT: APPROVE or CHANGES   UNMET: <each acceptance criterion not met, with evidence, or none>
 F1 [blocker|should|nit] <file:line or screen> <claim>. Evidence: <...>. Fix: <smallest change>. (stable ids)
 ```
 
@@ -113,14 +112,14 @@ check open ids and changed work only, and to mark each old id `resolved` or `sti
 - **Agreed:** no open blocker or should from either critic on the current work, and no concern of your own.
 - **Stuck:** an item stays disputed after two replies, or the budget ends. Show both sides in 2 to 3 lines each and
   let the user or the orchestrator decide. The end of the budget is not approval.
-- **Unvalidated:** output whose correctness is spatial or needs domain judgement, checked only by the worker's own
-  metrics, is reported as "unvalidated", not "accepted", even when both critics approve, so readers know nothing
+- **Unvalidated:** when output's correctness is spatial or needs domain judgement and only the worker's own metrics
+  checked it, report it as "unvalidated", not "accepted", even when both critics approve, so readers know nothing
   independent has checked it. It is a label, not a stop: work continues. It lifts when a check that does not reuse
   the worker's method passes (known-answer cases, an outside reference, human feedback).
 - Shipping still needs its usual authorisation. Do not push during the loop. Push after agreement only if the user
   asked to push, ship or update the PR. If you push to a PR, add above the model blurb, naming only critics that
-  completed: `Reviewed with sol-loop: <N> rounds, Sol + Opus. Verdicts: Sol <grade>, Opus <grade>.`
+  completed: `Reviewed with sol-loop: <N> rounds, Sol + Opus. Verdicts: Sol <verdict>, Opus <verdict>.`
 
-Report: grades before and after for each critic, rounds, models (and effort only if verified), what changed, diff
-size before and after, fixed and declined findings with reasons, usage if exposed (else say not), ledger path,
-pushed or not.
+Report each critic's verdict, material fixes, declined and unresolved findings with reasons, and validation gaps.
+Link the ledger for rounds, models (effort only if verified), diff sizes and usage (or say it was not exposed). Say
+whether a requested push completed.
