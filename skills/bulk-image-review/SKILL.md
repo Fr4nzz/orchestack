@@ -1,6 +1,6 @@
 ---
 name: bulk-image-review
-description: Use when an agent itself must look at many images (label or ground-truth review, transcription of photos, notebooks or envelopes, checking model outputs, curating crops, screenshot or slide audits). Read BEFORE launching image-reading agents. Gives the cost model, the ask-first threshold, and the patterns that kept a 300-item transcription job near 2 % of a week while a card review of similar size grew to about 55 %.
+description: Use when an agent itself must look at many images (label or ground-truth review, transcription of photos, notebooks or envelopes, checking model outputs, curating crops, screenshot or slide audits). Read BEFORE launching image-reading agents.
 ---
 
 # Bulk image review, cheaply
@@ -9,8 +9,9 @@ If `~/.config/orchestack/local.md` exists, read it first. Its budget rules overr
 
 ## Why it gets expensive
 
-Every image an agent opens stays in its context and is re-read on every later step, so one agent's cost grows
-with the square of the images it has seen. Retries (a failed image tool, a re-opened image) multiply it. A large
+When the harness keeps opened images in the agent's context, every later step processes them again, so with a
+steady number of steps per image one agent's input grows roughly with the square of the images it has seen. The
+pilot below gives the real cost. Retries (a failed image tool, a re-opened image) multiply it. A large
 chat that reviews screenshots itself pays its whole context on every turn as well.
 
 Measured on one week of real work (cost-weighted tokens from local transcripts):
