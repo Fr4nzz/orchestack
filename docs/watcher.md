@@ -8,7 +8,7 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
 
 | Check | Wakes | When |
 |---|---|---|
-| `jobs` | the thread named in the job file | every job in a job file ended or one failed, a job straggles or pends too long, or the owner thread is gone |
+| `jobs` | the thread named in the job file (its parent if that thread is gone) | every job in a job file ended or one failed, a job straggles or pends too long, or the owner thread is gone |
 | `children` | the child's parent | a T3 child's latest run failed (and the parent has not run since), it waits on an approval or answer, or a run is stuck |
 | `disk` | the orchestrator, at once | free space on a path is below `min_free_gb` |
 | `usage` | the orchestrator, with the backlog prompt | the weekly meter reset, usage is behind pace, or unused capacity will be lost at the next reset |
@@ -20,7 +20,8 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
 
 ### `jobs`
 
-- A job file wakes its thread once when every job in it ended, or when one failed (where job files live: below).
+- A job file wakes its thread when one of its jobs fails (once) and again when every job in it has ended (where job
+  files live: below).
 - A straggler wakes it once per job: still running at twice `expect_min` after the watcher first saw it run.
 - A pending job wakes it once: still pending `max_pend_h` hours after the file was written.
 - When the owner thread is deleted in T3, its parent (the file's `parent`, the lineage, else the orchestrator)
@@ -33,8 +34,9 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
   used (what is left is lost at the reset).
 - Several plan accounts: list the others in `accounts`.
   - Each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`.
-  - It may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours`. Otherwise they come
-    from the section, which then needs an explicit `weekly_pattern` too.
+  - It may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours`, otherwise they come
+    from the section.
+  - With `accounts` set, the section itself needs an explicit `weekly_pattern`.
   - Their wakes start with `[name]`.
   - A broken entry is skipped with an error on stderr and, after `fail_alert_minutes`, one alert.
   - If the first account cannot be read, the whole check fails and no account is checked that run.
