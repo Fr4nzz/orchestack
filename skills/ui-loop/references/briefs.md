@@ -28,17 +28,19 @@ dark mode, what fits one screen, anything templated, broken or unfinished. Prefe
 largest visible gain, and name the file and selector or component.
 
 Score /10 (one decimal) per category: typography, hierarchy, spacing and density, colour and contrast,
-consistency, clarity of actions, phone, dark mode. Then each page, then overall. Low scores need evidence.
+consistency, clarity of actions, phone, dark mode. Then each page. Low scores need evidence.
+Then one overall score: 10 ship as is, 9 only nits left, 7-8 shoulds open, 5-6 a blocker or a wrong approach,
+4 or less the change does not meet its intent. Score the confidence the work earns, not the number of comments.
 blocker = broken or misleading. should = a real problem readers or the owner will notice. nit = polish.
 Reply:
-CATEGORIES: ...   PAGES: ...   OVERALL: x
-VERDICT: APPROVE or CHANGES   UNMET: <pass bars or none>
+SCORE: N/10   CATEGORIES: ...   PAGES: ...
+VERDICT: APPROVE or CHANGES   UNMET: <each pass bar not met, with evidence, or none>
 F1 [blocker|should|nit] <page/shot or file:selector> <claim>. Evidence. Fix (smallest change).
 Up to 15 findings, stable ids.
 ```
 
 From round 2: add the ledger. For a new-lens round keep the full review. For a re-check of fixes say "check open ids
-and changed work only, mark each old id resolved or still open".
+and changed work only, mark each old id resolved or still open, and score again".
 
 ## Implementer brief (one implementer per round)
 

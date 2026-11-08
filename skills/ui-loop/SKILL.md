@@ -1,6 +1,6 @@
 ---
 name: ui-loop
-description: Use when the user says "ui loop", "ui-loop", "improve the UI", "polish the design" or "hill-climb the design" of a web page, app view, poster, slide or other visual, or asks to make a page easier to use.
+description: Improve a visual interface with the owner's taste, hands-on checks and two critics per round. Use when the user says "ui loop", "ui-loop", "improve the UI", "polish the design" or "hill-climb the design" of a web page, app view, poster, slide or other visual, or asks to make a page easier to use.
 ---
 
 # ui-loop
@@ -8,9 +8,8 @@ description: Use when the user says "ui loop", "ui-loop", "improve the UI", "pol
 If `~/.config/orchestack/local.md` exists, read it first, and the owner's taste file it names (default
 `~/.config/orchestack/ui-taste.md`). Both override the defaults here. `references/principles.md` holds the
 design rules with pass bars, and `references/briefs.md` holds the critic and implementer brief templates. This
-skill drives `sol-loop` (two critics per round) for visual work. Reviewing at the right screen sizes, using the
-interface, and respecting the owner's taste are what make UI review work. Most failures came from skipping one
-of them.
+skill drives `sol-loop` (two critics per round) for visual work. Most failures came from skipping one of three
+things: real screen sizes, using the interface, the owner's taste.
 
 ## 0. Before any change
 
@@ -51,7 +50,8 @@ Act as the target user, in a real headless browser, on the copy of the data:
 - Do the main task end to end several times (e.g. review 20 items, fill a form, find a fact). Time each step and
   count clicks and keystrokes per item. Then do it keyboard-only, then at 390 px, both themes and languages.
 - Write a ranked friction list with the numbers ("every item needs a mouse trip to a small Next button", "76 Tab
-  presses from a list row to starting a sample", "no Next button on the phone bar"). Fix the top items before the first critic round.
+  presses from a list row to starting a sample", "no Next button on the phone bar"). Fix the top items before the
+  first critic round.
 - This pass finds what screenshots cannot show: broken flows (starting a session was broken for every signed-in
   user), state bugs (an answer stored on the previous item while the next loads, advancing after a failed save),
   bars covering the save button on phones. One redesign cut confirming an item from three actions with a mouse
@@ -62,13 +62,12 @@ Act as the target user, in a real headless browser, on the copy of the data:
 
 Each round runs `sol-loop`: GPT Sol and a fresh Opus, in parallel, with the same brief (`references/briefs.md`),
 review only. They get the shots, the metrics, the taste evidence, the pass bars and the live URL (Playwright
-allowed for hover, focus, widths and the lightbox). They score each category /10 and list up to 15
-findings (blocker, should or nit), each with evidence and the smallest fix. Never tell critics a target score.
+allowed for hover, focus, widths and the lightbox). Each gives an overall score from 1 to 10, category scores and
+up to 15 findings (blocker, should or nit) with evidence and the smallest fix. Never tell critics a target score.
 
 Rounds follow sol-loop's budget (2 by default, a third or more when the owner asks or a blocker stays open). Pick
-a different lens for each round you have. In 8 rounds on one site, each lens found a different class of problem.
-These rounds ran one after another on a site that changed between them, so this is an observation, not a
-controlled comparison:
+a different lens for each round. In 8 rounds on one site, each lens found a different class of problem (an
+observation, not a controlled comparison, since the site changed between rounds):
 
 | round | lens | what it found |
 |---|---|---|
@@ -79,20 +78,21 @@ controlled comparison:
 | 5+ | judge fresh at real laptop heights, earlier findings not repeated | viewport fit at 1366x768, wrapping at 1024, empty grid cells |
 
 Notes:
-- Scores drift and differ by vendor (Sol scored about 0.5 above Opus every round, and adding references lowered
-  Sol's score). Track the stricter critic and the findings, not the number. Stop when both approve with only nits,
-  when the owner is happy, or when the budget ends.
+- Stop when every critic's overall score is at least 9/10 *(default)* with no blocker open, when the owner is
+  happy, or when the budget ends. Scores drift by vendor (Sol scored about 0.5 above Opus every round, and adding
+  references lowered Sol's), so judge by the lowest. If a round does not raise it, rethink the approach before
+  another. A category score is evidence to check, not a verdict.
 - One critic is not enough. A single approving critic passed a page whose own ledger already listed phone defects.
 - Lessons help and hurt. Critics given rule lists cited them and measured more, but also pushed generic rules
-  against the owner (unify shadows, drop boxes, remove brand colour). That is why the taste file goes in every brief.
+  against the owner's taste (unify shadows, drop boxes, remove brand colour).
 - A new-lens round is a full review. "Open ids plus changed work only" is for a re-check of fixes (sol-loop's later
   rounds, and posters).
 
 ## 4. Triage and one implementer
 
 - **Triage:** the lead merges both critics' findings into one implementer brief (`references/briefs.md`) with the
-  critics' ids, ranked by visible gain. Then it adds a "skipped by the owner's taste (do not do)" list and a
-  "waiting on the owner" list. Findings that only the owner can decide (copy, photos, logos, names) are batched
+  critics' ids, ranked by visible gain, plus a "skipped by the owner's taste (do not do)" list and a "waiting on
+  the owner" list. Findings that only the owner can decide (copy, photos, logos, names) are batched
   into one question and kept out of scope until answered.
 - **One implementer per round** (never several editing the same styles). It reads the design doc and shared
   tokens first, reuses shared components, never invents facts, skips anything against the taste file and says
@@ -108,10 +108,10 @@ Notes:
 - Re-shoot and re-run metrics, and compare with `before/` (e.g. "text under 4.5:1: 3,060 to 87"). Check the
   console is clean, there is no sideways scroll at 360 and 390, and focus is visible. Re-run the hands-on task
   timing.
-- Show the owner at once (orchestrator skill, **Reports**): the live link and a before/after page or annotated pairs, sent as
-  `done: <what> <link>` the moment it is up, not at the end of the lane.
-- Next round: a new lens (a full review) or a re-check of fixes (open ids plus changed work), always with fresh
-  critics. A fresh critic also catches what an earlier round missed.
+- Show the owner at once (orchestrator skill, **Reports**): the live link and a before/after page or annotated
+  pairs, sent as `done: <what> <link>` once it is up.
+- Next round (a new lens or a re-check of fixes): always fresh critics, who also catch what earlier rounds missed.
+- The final reply carries sol-loop's per-round score table of overall scores.
 
 ## Variants
 
