@@ -132,8 +132,8 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     Most turns you end wake your parent, so wait inside one turn with one shell loop that polls the job or command. It stops with CAP_REACHED after CAP seconds, or PEND_LONG once a job has pended PEND_S seconds. hpcstack's cluster-ops references/monitoring.md has such a loop.
     Under 10 min: one foreground command (Bash timeout 600000, loop CAP=420 PEND_S=300).
     10 to 45 min: one background command (Bash timeout at least (CAP+180) x 1000 ms, e.g. 3000000) plus t3_background_wait, never re-armed. End that turn with one short line and report in the turn its completion starts.
-    Longer, or if that loop runs out: python3 <orchestack>/watcher/watch.py add --job <id> --next-step "..." --expect-min <runtime> --max-pend-h 3, write a state file (outputs, next step), then end once with waiting: <job ids>. No watcher: schedule one wake at the projected finish instead.
-    When the watcher wakes you because every job ended or one failed: read the state file, move the job file to the done/ folder next to it, re-add any jobs still running, then report.
+    Longer, or if that loop runs out: python3 <orchestack>/watcher/watch.py add --job <id> --next-step "..." --expect-min <runtime> --max-pend-h 3, write a state file (outputs, next step), then end once with waiting: <job ids>. Outside a T3 shell, also pass --thread <your thread id>. No watcher: schedule one wake at the projected finish instead.
+    When the watcher wakes you because every job ended or one failed: read the state file, move the job file to the done/ folder next to it, re-add only that file's unfinished jobs (pending ones too) with both limits, then report.
     On a straggler or pend-limit wake: keep the job file, act if needed, end with waiting: and send nothing.
     ```
     For a launched lead (**Launch leads**), add the wait block and this one, with your thread id:
