@@ -1011,7 +1011,8 @@ def child_decision_relayed(db, parent, child, created, since=None):
     for at, text in db.execute(Q_SENT_BY, (parent, since, str(child))).fetchall():
         if (at or "") >= created or SENT_REPORT_RE.match(text or ""):
             return True
-    return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child, db))
+    # From the turn start: T3 can write the relay before the final message's timestamp (seen 9 Nov, 2 min early).
+    return any(db.execute(Q_RELAYED, (parent, since, t)).fetchone() for t in relay_tokens(child, db))
 
 
 def report_parts(text):

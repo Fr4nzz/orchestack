@@ -2188,6 +2188,22 @@ def test_combined_resend_of_two_versions_delivers_both(tmp_path):
     assert rig.wakes() == []
 
 
+def test_relay_written_before_the_childs_final_message_still_counts(tmp_path):
+    rig, conn = launched_rig(tmp_path)
+    add_thread(conn, "thread:delegated-task:crit-r3", "Critic r3", parent="orch-1",
+               updated=at(12))
+    rig.run(at(2))
+    child = "thread:delegated-task:crit-r3"
+    add_run(conn, child, 1, "completed", at(5), at(12))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('r1', 'orch-1', 'user', 0, ?, ?, ?)",
+                 (at(10), at(10), json.dumps({"text": "Delegated task node:thread%3Adelegated-task%3Acrit-r3"
+                                                       " (Critic r3) [completed]: done: 6/10"})))
+    conn.commit()
+    add_message(conn, "c1", child, "assistant", "done: 6/10", at(12))
+    rig.run(at(60))
+    assert rig.wakes() == []
+
+
 # ---------- pace ----------
 
 def pace_run(rig, now):
