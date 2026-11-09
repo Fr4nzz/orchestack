@@ -7,7 +7,7 @@ description: Use when a chat coordinates other chats, delegates or subagents, wh
 
 If `~/.config/orchestack/local.md` exists, read it now. Its personal values (name, time zone, usage meter, pinned
 models, pace, cluster rules, thread ids) override the defaults here. *(default)* marks chosen policy, not a
-measurement. The README has the measurements, `references/relays.md` the relay details and incidents. Terms: a
+measurement. `references/relays.md` has the relay details and incidents. Terms: a
 *lane* is one independent stream of work with one owner, a *lead* is a chat that owns a lane, a *wake* is any
 message that starts a turn in an idle chat. T3 *relays* most turn ends of an async delegate to its parent as a new
 message, which wakes the parent (**Reports**).
@@ -48,7 +48,9 @@ message, which wakes the parent (**Reports**).
    lane it does not own forwards it to the owner, because two owners dispatch duplicate work.
 6. **Every wake re-reads the whole context,** about 0.1x its size within the cache lifetime (about 1 h), 2x after.
    Batch small items for a big idle chat into its next real task. Above about 400k, give multi-step work to a fresh
-   worker (it pays back after 1 to 2 steps). Never reuse a large finished delegate for an unrelated task.
+   worker (it pays back after 1 to 2 steps). **A revision goes back to its builder**
+   (`t3_thread_send` keeps its context, which a fresh worker re-reads). Critics stay fresh (`sol-loop`). Any
+   other task, or a builder past about 200k *(default)*, gets a new worker.
 7. **Reports: children and sub-leads send up only what the user can open or decide on,** in messages that start
    with `decision:`, `done:`, `failed:` or `handoff:`.
    - **Deliverables at once:** a page, report, figure or draft the user is meant to open or review (not intermediate
@@ -62,8 +64,7 @@ message, which wakes the parent (**Reports**).
      real task. Answer a stray progress note in one line or not at all. A turn that only logs progress ends with
      `noted: ...`, a long wait with `waiting: <job ids> ...`. Both end a turn, never send, and wake no one.
    - **Send the final report or end with it, never both.** Send it from a turn the watcher, a scheduled wake or
-     your own delegate's notice started, and from a launched lead: T3 does not relay those turns (for delegate
-     notices this was observed once).
+     your own delegate's notice started, and from a launched lead: T3 does not relay those turns.
      End any other turn with it: T3 relays an async delegate's turn end, whatever it says, when its task, its
      parent's message or a background command started the turn. Start every report with its word, because the watcher
      catches only those.
@@ -84,13 +85,13 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
    wait block's sizes. Codex: the same within its tool timeout, never a series of `sleep` calls. Never re-arm a
    background wait (each re-arm adds relays).
 10. **Use the orchestack watcher, not AI scheduled checks.** It runs every 15 min without a model and wakes a chat
-    only when something changed (the README lists the checks). No recurring AI schedules, except a one-off wake at
+    only when something changed. No recurring AI schedules, except a one-off wake at
     a projected finish the watcher cannot see (record its id, delete it when the work settles).
 11. **Launch leads for long lanes** (only with the user's standing permission in `local.md`, off by default). A
     `t3_thread_launch` child has no completion relay and wakes you only when it sends. With that permission, launch
     any lane expected to take over about 10 turns or a day, or with two or more steps that each wait 10 min or more,
     after reading `references/leads.md`. One-off tasks and critics stay delegates. Read a new lead once with
-    `t3_thread_read` (T3's launch text asks for a read or a wait), then don't wait on or poll it: its send wakes you.
+    `t3_thread_read`, then don't wait on or poll it: its send wakes you.
     Without the permission, delegate and follow **Reports**, **Long waits** and **Short waits**.
 12. **Fan out in batches** of 10 to 20 text items per worker (images: `bulk-image-review`), results to files and one
     summary back. Before a cluster wave or a repeated fan-out, read **Waves** in `references/operations.md`.
