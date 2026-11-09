@@ -1016,10 +1016,12 @@ def child_decision_relayed(db, parent, child, created, since=None):
 
 def report_parts(text):
     """(words, identifiers) of a report's first 200 characters. Identifiers are versions, job ids and file paths:
-    tokens with a digit, a slash or a file extension."""
+    tokens with a digit, a slash or a file extension, but not bare numbers ("30 px")."""
     t = (text or "")[:200].lower()
+    if len(text or "") > 200:
+        t = t.rsplit(None, 1)[0]  # the last token may be cut off
     ids = {i.rstrip(".,;:)") for i in re.findall(r"[\w./-]+", t)
-           if re.search(r"\d|/|\.[a-z]{2,5}$", i.rstrip(".,;:)"))}
+           if re.search(r"\d|/|\.[a-z]{2,5}$", i.rstrip(".,;:)")) and not re.fullmatch(r"[\d.,]+", i.rstrip(".,;:)"))}
     return set(re.findall(r"[a-z0-9]{3,}", t)) - REPORT_WORDS, ids
 
 
@@ -1071,7 +1073,12 @@ def lead_report_sent(db, recipients, lead, created, kind, text):
             if not m:
                 continue
             at = at or ""
-            if lo <= at < hi and m.group(1).lower() == kind and not ids_conflict(sent, text):
+            versions = set(re.findall(r"\bv\d+(?:\.\d+)+\b", (text or "")[:200].lower()))
+            if versions and versions <= set(re.findall(r"\bv\d+(?:\.\d+)+\b", (sent or "").lower())) \
+                    and at >= created and m.group(1).lower() == kind:
+                return True  # a later send naming this report's versions (several reports re-sent at once)
+            if (lo <= at < hi and m.group(1).lower() == kind and "work continues" not in (sent or "").lower()
+                    and not ids_conflict(sent, text)):
                 return True
             if at >= created and same_report(sent, text):
                 return True

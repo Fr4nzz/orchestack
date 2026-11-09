@@ -2175,6 +2175,19 @@ def test_lead_report_sent_then_ended_with_a_reworded_copy_is_delivered(tmp_path)
     assert rig.wakes() == []
 
 
+def test_combined_resend_of_two_versions_delivers_both(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(10))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.4 with a 30 px minimum, 3 pages", at(10))
+    add_run(conn, "mcp:lead-7", 3, "completed", at(15), at(20))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "done: report v9.5 at 5 s per answer", at(20))
+    add_run(conn, "mcp:lead-7", 4, "completed", at(30), at(31))
+    lead_send(conn, "s1", "done: report v9.4 + v9.5 (re-sent; the turn-end versions never reached you)", at(31))
+    rig.run(at(60))
+    assert rig.wakes() == []
+
+
 # ---------- pace ----------
 
 def pace_run(rig, now):
