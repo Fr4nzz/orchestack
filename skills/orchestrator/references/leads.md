@@ -19,7 +19,8 @@ the user's request for a new thread that T3's own instructions ask for.
    run `python3 <orchestack>/watcher/watch.py lead --thread <its threadId>` in your own shell (add
    `--parent <your id>` where the shell has no `$T3CODE_THREAD_ID`). T3 records no parent for a launched thread,
    and this lead file lets the watcher wake you when the lead fails, is stuck, waits on an approval, or ends a turn
-   with a report it never sent.
+   with a report it never sent. Without the file, the watcher takes the parent from who launched a thread titled
+   `Lead:` (up a chain of leads to the first other thread), so keep that title.
 3. Run it again with `--remove` when the lane is done.
 
 ## Cost

@@ -63,9 +63,9 @@ message, which wakes the parent (**Reports**).
    - **Progress stays in files:** a notes file (default `.work/orchestrator/NOTES.md`) the lead reads on its next
      real task. Answer a stray progress note in one line or not at all. A turn that only logs progress ends with
      `noted: ...`, a long wait with `waiting: <job ids> ...`. Both end a turn, never send, and wake no one.
-   - **Send the final report or end with it, never both.** Send it from a turn the watcher, a scheduled wake or
-     your own delegate's notice started, and from a launched lead: T3 does not relay those turns.
-     End any other turn with it: T3 relays an async delegate's turn end, whatever it says, when its task, its
+   - **Who sends the final report:** a launched lead sends every report, since T3 never relays its turns. A
+     delegate sends it from a turn the watcher, a scheduled wake or its own delegate's notice started, and only
+     ends any other turn with it, never both: T3 relays an async delegate's turn end, whatever it says, when its task, its
      parent's message or a background command started the turn. Start every report with its word, because the watcher
      catches only those.
    - **Fewer turn ends, fewer wakes:** a child starts its own delegates and critics with `delegate_task` mode "wait"
@@ -123,8 +123,8 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     Command safety: absolute paths. No cd in compound commands. No rm of globs, variables or relative paths. Fresh timestamped output folders. No git commit -a, git reset --hard, git clean or force pushes.
     If command syntax triggers an approval prompt, use an equivalent permitted form. If the action itself needs permission, wait for it.
     Report to your parent only done:, failed:, decision: or handoff:, starting with that word. Never send waiting: or noted:.
-    If the watcher, a scheduled wake or your own delegate's completion notice started this turn, or you were launched rather than delegated, send the report (t3_thread_send, mode "queue").
-    Otherwise (your task, your parent's message or a background command started the turn), end the turn with the report.
+    Launched rather than delegated (a lead): send every report (t3_thread_send, mode "queue"), whatever started the turn. T3 never relays your turns.
+    Delegated: send it when the watcher, a scheduled wake or your own delegate's completion notice started this turn. Otherwise end the turn with it.
     A deliverable the user is meant to open or review: send "done: <what> <link>, work continues" at once (t3_thread_send, mode "queue") and keep working. One that ends your task is your final report.
     Start any delegate_task child (a delegate or critic) with mode "wait" (timeoutMs about its expected time) when this turn needs its result. Otherwise, or when the wait returns without a result, follow its next: end your turn with "waiting: delegates" (no ids, which name scheduler jobs only), then send the report from the turn its completion starts.
     End your turn only with the result, a failure, a real question, the waiting: handoff or the short line of a background wait.

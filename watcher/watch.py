@@ -70,6 +70,8 @@ RESULT_RE = re.compile(r"^\s*[*_>]*\s*(decision|done|failed|handoff):", re.I)  #
 # "**done** - s05:") or before it, set off by bold, a spaced dash or a single code-like token ("**Retrain stage**
 # done:", "Classifier freeze - failed:", "cls-freeze handoff:"). Free prose before the word ("Download done: now
 # training") and negations ("not yet done:", "isn't done:") are progress: counting them would lose a real report.
+REPORT_WORDS = {"decision", "done", "failed", "handoff"}
+LEAD_TITLE_RE = re.compile(r"\s*lead\b", re.I)  # a lead's thread title: "Lead: <lane>"
 SENT_REPORT_RE = re.compile(
     r"^\s*(?![^:\n]{0,80}?(?:n['\u2019]t|(?<![A-Za-z])(?:not|never|yet|almost|nearly)(?![A-Za-z])))"
     r"(?:\*\*[^*:\n]{1,60}\*\*\s*(?:[-\u2013\u2014]\s*)?|[^*:\n]{1,60}?\s[-\u2013\u2014]\s+|[\w.]*[-\d][\w.-]*\s+)?"
@@ -114,6 +116,11 @@ Q_THREAD = (
     "SELECT title, json_extract(payload_json, '$.lineage.parentThreadId'), deleted_at, archived_at"
     " FROM orchestration_v2_projection_threads WHERE thread_id = ?"
 )
+# Who launched a thread: the sender of its first message, when another agent thread wrote it (t3_thread_launch).
+Q_LAUNCHER = (
+    "SELECT json_extract(payload_json, '$.createdBy'), json_extract(payload_json, '$.senderThreadId')"
+    " FROM orchestration_v2_projection_messages WHERE thread_id = ? AND role = 'user' ORDER BY created_at LIMIT 1"
+)
 Q_LATEST_RUN = (
     "SELECT run_id, status, requested_at, completed_at FROM orchestration_v2_projection_runs"
     " WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1"
@@ -143,6 +150,18 @@ Q_LATEST_MESSAGE = (
     "SELECT message_id, role, streaming, created_at, substr(json_extract(payload_json, '$.text'), 1, 4000)"
     " FROM orchestration_v2_projection_messages WHERE thread_id = ? ORDER BY created_at DESC, message_id DESC LIMIT 1"
 )
+# A launched lead's recent messages, newest first: its reports can sit under later messages, since nothing relays them.
+Q_RECENT_MESSAGES = (
+    "SELECT message_id, role, streaming, created_at, substr(json_extract(payload_json, '$.text'), 1, 4000)"
+    " FROM orchestration_v2_projection_messages WHERE thread_id = ? AND created_at >= ? AND role = 'assistant'"
+    " ORDER BY created_at DESC, message_id DESC"
+)
+# A lead's turn starts.
+Q_LEAD_RUNS = (
+    "SELECT requested_at, json_extract(payload_json, '$.startedAt') FROM orchestration_v2_projection_runs"
+    " WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 500"
+)
+
 # T3's completion relay in the parent: a user message "Delegated task node:<encoded child id> (<title>) [<status>]".
 Q_RELAYED = (
     "SELECT 1 FROM orchestration_v2_projection_messages"
@@ -169,7 +188,8 @@ PLANNED = {
                  (Q_ACTIVE_RUNS, ()), (Q_PENDING_REQUESTS, ()), (Q_BUSY, ("",))],
     "decision": [(Q_BUSY, ("",)), (Q_LATEST_USER_MESSAGES, ("",)), (Q_ANSWERED_AFTER, ("", "")),
                  (Q_PROJECTS, ()), (Q_RECENT_THREADS, ("", "")), (Q_THREAD, ("",)), (Q_LATEST_MESSAGE, ("",)),
-                 (Q_RELAYED, ("", "", "")), (Q_SENT_BY, ("", "", "")), (Q_RECENT_RUNS, ("",))],
+                 (Q_RELAYED, ("", "", "")), (Q_SENT_BY, ("", "", "")), (Q_RECENT_RUNS, ("",)),
+                 (Q_LAUNCHER, ("",)), (Q_RECENT_MESSAGES, ("", "")), (Q_LEAD_RUNS, ("",))],
 }
 SCAN_OK = {"projection_projects", "orchestration_v2_projection_runtime_requests"}  # tiny tables
 SCAN_RE = re.compile(r"^SCAN (?:TABLE )?(\w+)(?: USING (?:COVERING )?INDEX (\S+))?")
@@ -329,11 +349,46 @@ class Ctx:
 
     def thread(self, thread_id):
         """(title, parent id) of a live thread, or None. Primary-key lookup. A thread without a T3 lineage parent
-        takes the parent from its lead file, if one exists (a launched lead)."""
+        takes the parent from its lead file, else from the agent thread that sent its first message (a launched
+        lead that was never registered with `watch.py lead`)."""
         row = self.db().execute(Q_THREAD, (thread_id,)).fetchone()
         if not row or row[2] or row[3]:
             return None
-        return row[0], row[1] or lead_parent(thread_id)
+        return row[0], row[1] or self.launched_parent(thread_id, row[0])
+
+    def launched_parent(self, thread_id, title=None):
+        """The parent of a thread T3 never relays: its lead file's, else, for a thread titled "Lead:", the top of its
+        launch chain (see `launch_chain`)."""
+        chain = self.launch_chain(thread_id, title)
+        return lead_parent(thread_id) or (chain[-1] if chain else None)
+
+    def launch_chain(self, thread_id, title=None):
+        """Who launched a thread titled "Lead:", then who launched that one while it is an unregistered lead too,
+        up to the first other thread (an orchestrator). A lead launched by another lead often reports straight to
+        the orchestrator, so a report sent to any thread in the chain counts as delivered. Only leads: other chats,
+        an orchestrator among them, may also have been opened by another thread."""
+        chain, tid = [], str(thread_id)
+        while len(chain) < 6:
+            if title is None:
+                row = self.db().execute(Q_THREAD, (tid,)).fetchone()
+                title = row[0] if row and not row[1] else ""
+            if chain and lead_parent(tid):  # a registered lead in the chain: its recorded parent ends the chain
+                if lead_parent(tid) not in chain:
+                    chain.append(lead_parent(tid))
+                break
+            if not LEAD_TITLE_RE.match(str(title or "")):
+                break
+            up = self.launcher(tid)
+            if not up or up in chain or up == str(thread_id):
+                break
+            chain.append(up)
+            tid, title = up, None
+        return chain
+
+    def launcher(self, thread_id):
+        row = self.db().execute(Q_LAUNCHER, (str(thread_id),)).fetchone()
+        sender = str(row[1] or "") if row and row[0] == "agent" else ""
+        return sender if sender and THREAD_ID_RE.match(sender) and sender != str(thread_id) else None
 
 
 def leads_dir():
@@ -435,7 +490,7 @@ def resolve_owner(ctx, thread, parent=""):
         return thread, False
     if not row or not row[2]:  # exists, or unknown here (an archived thread still takes a send)
         return thread, False
-    for cand in (parent, row[1] or lead_parent(thread)):
+    for cand in (parent, row[1] or ctx.launched_parent(thread)):
         if cand and THREAD_ID_RE.match(str(cand)) and ctx.thread(cand):
             return cand, True
     return ctx.orchestrator, True
@@ -722,8 +777,9 @@ def check_children(ctx):
                 continue  # not marked seen: decided once the parent is idle
             prun = db.execute(Q_LATEST_RUN, (parent,)).fetchone()
             # A parent run after the failure shows T3 relayed it, except for a launched lead, which is never
-            # relayed: its parent comes from a lead file, not the lineage.
-            if prun and prun[2] > when and parent != lead_parent(tid):
+            # relayed: its parent comes from a lead file or its launcher, not the lineage.
+            lineage = db.execute(Q_THREAD, (tid,)).fetchone()
+            if prun and prun[2] > when and lineage and lineage[1]:
                 seen[key] = iso(ctx.now)
                 ctx.note(f"children: {short(title, 40)} {what}, parent already ran after it")
                 continue
@@ -958,12 +1014,79 @@ def child_decision_relayed(db, parent, child, created, since=None):
     return any(db.execute(Q_RELAYED, (parent, created, t)).fetchone() for t in relay_tokens(child, db))
 
 
+def report_parts(text):
+    """(words, identifiers) of a report's first 200 characters. Identifiers are versions, job ids and file paths:
+    tokens with a digit, a slash or a file extension."""
+    t = (text or "")[:200].lower()
+    ids = {i.rstrip(".,;:)") for i in re.findall(r"[\w./-]+", t)
+           if re.search(r"\d|/|\.[a-z]{2,5}$", i.rstrip(".,;:)"))}
+    return set(re.findall(r"[a-z0-9]{3,}", t)) - REPORT_WORDS, ids
+
+
+def same_report(sent, report):
+    """A sent message carries this report. Identifiers must not conflict: each side naming one the other lacks
+    rejects the match, so "v9.3" never delivers "v9.2". Then most words must be shared: 60 % of the shorter side,
+    or 80 % of the longer one when either side has under 4 words. Two different reports in the same words with no
+    identifiers still match: a known gap, cheaper than spare wakes."""
+    (a, ia), (b, ib) = report_parts(sent), report_parts(report)
+    if ids_conflict(sent, report):
+        return False
+    if not a or not b:
+        return False
+    if min(len(a), len(b)) < 4:
+        return len(a & b) >= 0.8 * max(len(a), len(b))
+    return len(a & b) >= 0.6 * min(len(a), len(b))
+
+
+def ids_conflict(sent, report):
+    """Each side names an identifier (version, path, job id) the other lacks. Two identifiers agree when one
+    contains the other (a full path and its file name, or a path cut off at 200 characters)."""
+    ia, ib = report_parts(sent)[1], report_parts(report)[1]
+    def lacks(xs, ys):
+        return any(not any(x in y or y in x for y in ys) for x in xs)
+    return lacks(ia, ib) and lacks(ib, ia)
+
+
+def lead_report_sent(db, recipients, lead, created, kind, text):
+    """A launched lead's report reached a thread it may report to (T3 never relays a launched lead). Delivered by
+    a report send (decision/done/failed/handoff) to one of them that either
+    - has the same word, falls between the lead's previous and next report (sent first and then a turn ended with
+      a reworded copy, or sent after), and names no conflicting identifier (versions, paths), so an interim
+      "done: draft at out/fig.html" never delivers "done: final v10"; or
+    - carries this report (`same_report`), at any later time (re-sent when asked).
+    A progress send, or a send of another report, does not deliver it. Q_SENT_BY keeps the 50 newest sends: a
+    chatty lead can push the match out, which costs a spare wake, never a lost report."""
+    starts = sorted(s for s in (started or requested for requested, started in db.execute(Q_LEAD_RUNS, (lead,)))
+                    if s)
+    # The window opens at the lead's previous report, else at the start of the turn before this one.
+    begin = max([s for s in starts if s <= created][-2:-1] or [s for s in starts if s <= created][:1] or [created])
+    begin = min(begin, created)
+    reports = sorted(r[3] for r in db.execute(Q_RECENT_MESSAGES, (str(lead), begin)).fetchall()
+                     if r[3] != created and RESULT_RE.match(r[4] or ""))
+    lo = max([begin] + [t for t in reports if t < created])
+    hi = min(["9999"] + [t for t in reports if t > created])
+    for parent in dict.fromkeys(recipients):
+        for at, sent in db.execute(Q_SENT_BY, (parent, begin, str(lead))).fetchall():
+            m = SENT_REPORT_RE.match(sent or "")
+            if not m:
+                continue
+            at = at or ""
+            if lo <= at < hi and m.group(1).lower() == kind and not ids_conflict(sent, text):
+                return True
+            if at >= created and same_report(sent, text):
+                return True
+    return False
+
+
 def child_decision_open(db, item):
     """A held child-decision wake is still due: the decision is still the child's last message and no relay came."""
     r = item["recheck"]
     row = db.execute(Q_LATEST_MESSAGE, (r["child"],)).fetchone()
     if r.get("kind") == "nojob":  # the child's own no-job-file wake: due while that handoff is still its last word
         return bool(row) and row[0] == r["message"]
+    if r.get("kind") == "lead":  # a launched lead's report stays due under later messages until it reaches the parent
+        return not lead_report_sent(db, r.get("recipients") or [r["parent"]], r["child"], r["created"],
+                                    r.get("report") or "done", r.get("text") or "")
     return bool(row) and row[0] == r["message"] and not child_decision_relayed(db, r["parent"], r["child"],
                                                                                 r["created"],
                                                                                 r.get("since") or turn_start(
@@ -982,6 +1105,8 @@ def check_child_decisions(ctx, sec, st, after):
     baseline = ctx.first or (ctx.baseline and "child_seen" not in st)
     results_baseline = baseline or (ctx.baseline and not st.get("child_results"))
     st["child_results"] = True
+    lead_baseline = baseline or "lead_reports" not in st  # the first run that scans every lead report records them
+    st["lead_reports"] = True
     seen = st.setdefault("child_seen", {})
     prune(seen, ctx.now)
     nojob_seen = st.setdefault("nojob_seen", {})
@@ -993,65 +1118,78 @@ def check_child_decisions(ctx, sec, st, after):
             row = db.execute(Q_LATEST_MESSAGE, (tid,)).fetchone()
             if not row:
                 continue
-            mid, role, streaming, created, text = row
-            text = text or ""
-            m = RESULT_RE.match(text)
-            w = None if m else WAITING_RE.match(text)
-            if mid in seen or role != "assistant" or streaming or created < since or not (m or w):
-                continue
-            kind = m.group(1).lower() if m else "waiting"
-            if baseline or (results_baseline and kind != "decision"):  # every open one, of any age, is handled
-                seen[mid] = iso(ctx.now)
-                continue
-            age = ctx.now - parse_iso(created)
-            if age < after or db.execute(Q_BUSY, (tid,)).fetchone():
-                continue
-            info = ctx.thread(tid)
-            if not info or not info[1]:
-                continue  # not a child
-            if kind == "waiting" and mid not in nojob_seen:  # a wait on jobs that no job file lists
-                nojob_seen[mid] = iso(ctx.now)
-                if owners is None:
-                    owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
-                # Only the ids listed after "waiting:" are waited on (full array element ids kept, so a range
-                # "4101[1000-2000]" is one id). Without a list, "job <id>" in the text counts. A registered base id
-                # covers its elements, as in the jobs check, and an element id covers itself.
-                named = list(dict.fromkeys(WAIT_ID_RE.findall(w.group(1)) or JOB_NAMED_RE.findall(text)))
-                missing = [j for j in named if j not in known and j.split("[")[0] not in known]
-                if missing and not OWN_WAIT_RE.search(text):
-                    ctx.note(f"decision: child {short(info[0], 40)} ({tid}) waiting on job {', '.join(missing)}"
-                             " without a job file -> wake the child")
-                    ctx.wake(tid, "decision", NOJOB_TEXT.format(watch=Path(__file__).resolve(),
-                                                                jobs=" ".join(f"--job {j}" for j in missing)),
-                             recheck={"kind": "nojob", "child": tid, "message": mid})
-            if kind == "waiting":
-                seen[mid] = iso(ctx.now)
-                continue  # a long wait is progress: the parent is not woken
-            if not ctx.thread(info[1]):
-                continue  # its parent is gone: nobody to wake
-            title, parent = info
-            if db.execute(Q_BUSY, (parent,)).fetchone():
-                continue  # not marked seen: T3 may write the relay when the parent's turn ends
-            seen[mid] = iso(ctx.now)
-            turn = turn_start(db, tid, created)
-            if child_decision_relayed(db, parent, tid, created, turn):
-                continue
-            if kind == "handoff":
-                # A handoff from a child that owns an open job file is the old ending of a long wait (now
-                # "waiting:"): the jobs wake restarts the child, so the parent is not woken. Others still wake it.
-                if owners is None:
-                    owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
-                if tid in owners:
-                    ctx.note(f"decision: child {short(title, 40)} ({tid}) handoff with an open job file, parent"
-                             " not woken")
+            rows, lead = [row], False
+            lineage = db.execute(Q_THREAD, (tid,)).fetchone()
+            if lineage and not lineage[1] and ctx.launched_parent(tid, lineage[0]):
+                # A launched lead: every report it wrote counts, not only its last message.
+                lead = True
+                rows += [r for r in db.execute(Q_RECENT_MESSAGES, (tid, since)).fetchall()
+                         if r[0] != row[0] and RESULT_RE.match(r[4] or "")]
+            for row in rows:
+                mid, role, streaming, created, text = row
+                text = text or ""
+                m = RESULT_RE.match(text)
+                w = None if m else WAITING_RE.match(text)
+                if mid in seen or role != "assistant" or streaming or created < since or not (m or w):
                     continue
-            snippet = short(text.strip(), 90)
-            what = "a decision" if kind == "decision" else f"a {kind}: report"
-            ctx.note(f"decision: child {short(title, 40)} ({tid}) {kind} not relayed -> wake {parent}")
-            ctx.wake(parent, "decision", f'child "{short(title, 60)}" ({tid}) ended with {what} '
-                                         f"{int(age.total_seconds() // 60)} min ago that T3 did not relay to you: "
-                                         f"{snippet}",
-                     recheck={"child": tid, "message": mid, "parent": parent, "created": created, "since": turn})
+                kind = m.group(1).lower() if m else "waiting"
+                if baseline or (results_baseline and kind != "decision") or (lead and lead_baseline):
+                    seen[mid] = iso(ctx.now)
+                    continue
+                age = ctx.now - parse_iso(created)
+                # A busy child may still send its report, except a lead's earlier report: nothing relays it.
+                if age < after or ((not lead or mid == rows[0][0]) and db.execute(Q_BUSY, (tid,)).fetchone()):
+                    continue
+                info = ctx.thread(tid)
+                if not info or not info[1]:
+                    continue  # not a child
+                if kind == "waiting" and mid not in nojob_seen:  # a wait on jobs that no job file lists
+                    nojob_seen[mid] = iso(ctx.now)
+                    if owners is None:
+                        owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
+                    # Only the ids listed after "waiting:" are waited on (full array element ids kept, so a range
+                    # "4101[1000-2000]" is one id). Without a list, "job <id>" in the text counts. A registered base id
+                    # covers its elements, as in the jobs check, and an element id covers itself.
+                    named = list(dict.fromkeys(WAIT_ID_RE.findall(w.group(1)) or JOB_NAMED_RE.findall(text)))
+                    missing = [j for j in named if j not in known and j.split("[")[0] not in known]
+                    if missing and not OWN_WAIT_RE.search(text):
+                        ctx.note(f"decision: child {short(info[0], 40)} ({tid}) waiting on job {', '.join(missing)}"
+                                 " without a job file -> wake the child")
+                        ctx.wake(tid, "decision", NOJOB_TEXT.format(watch=Path(__file__).resolve(),
+                                                                    jobs=" ".join(f"--job {j}" for j in missing)),
+                                 recheck={"kind": "nojob", "child": tid, "message": mid})
+                if kind == "waiting":
+                    seen[mid] = iso(ctx.now)
+                    continue  # a long wait is progress: the parent is not woken
+                if not ctx.thread(info[1]):
+                    continue  # its parent is gone: nobody to wake
+                title, parent = info
+                if db.execute(Q_BUSY, (parent,)).fetchone():
+                    continue  # not marked seen: T3 may write the relay when the parent's turn ends
+                seen[mid] = iso(ctx.now)
+                turn = turn_start(db, tid, created)
+                recipients = [parent, *ctx.launch_chain(tid, title)] if lead else [parent]
+                if (lead_report_sent(db, recipients, tid, created, kind, text) if lead
+                        else child_decision_relayed(db, parent, tid, created, turn)):
+                    continue
+                if kind == "handoff":
+                    # A handoff from a child that owns an open job file is the old ending of a long wait (now
+                    # "waiting:"): the jobs wake restarts the child, so the parent is not woken. Others still wake it.
+                    if owners is None:
+                        owners, known = set(open_job_owners(ctx)), all_job_ids(ctx)
+                    if tid in owners:
+                        ctx.note(f"decision: child {short(title, 40)} ({tid}) handoff with an open job file, parent"
+                                 " not woken")
+                        continue
+                snippet = short(text.strip(), 90)
+                what = "a decision" if kind == "decision" else f"a {kind}: report"
+                ctx.note(f"decision: child {short(title, 40)} ({tid}) {kind} not relayed -> wake {parent}")
+                ctx.wake(parent, "decision", f'child "{short(title, 60)}" ({tid}) ended with {what} '
+                                             f"{int(age.total_seconds() // 60)} min ago that T3 did not relay to you: "
+                                             f"{snippet}",
+                         recheck={"child": tid, "message": mid, "parent": parent, "created": created, "since": turn,
+                                  **({"kind": "lead", "recipients": recipients, "report": kind, "text": text[:200]}
+                                     if lead else {})})
 
 
 DURATION_RE = re.compile(r"^\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s)?\s*$", re.I)

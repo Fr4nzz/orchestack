@@ -11,6 +11,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 WATCH = REPO / "watcher" / "watch.py"
+
+
+def _load_watch():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("orchestack_watch", WATCH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+WATCH_MOD = _load_watch()
 T0 = "2026-01-07T12:00:00.000Z"  # a Wednesday
 
 
@@ -1917,6 +1928,250 @@ def test_unregistered_launched_thread_stays_top_level(tmp_path):
     add_thread(conn, "mcp:other", "Some chat", updated=at(10))
     add_run(conn, "mcp:other", 1, "failed", at(5), at(10))
     rig.run(at(15))
+    assert rig.wakes() == []
+
+
+def unregistered_lead_rig(tmp_path):
+    """A lead launched by orch-1 (its first message is orch-1's send) that nobody registered with `watch.py lead`."""
+    rig = Rig(tmp_path)
+    db = tmp_path / "state.sqlite"
+    conn = make_db(db)
+    add_thread(conn, "orch-1", "Orchestrator: shop")
+    add_thread(conn, "mcp:lead-7", "Lead: report", updated=at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('m0', 'mcp:lead-7', 'user', 0, ?, ?, ?)",
+                 (at(1), at(1), json.dumps({"text": "You are the lead for the report.", "createdBy": "agent",
+                                            "senderThreadId": "orch-1"})))
+    conn.commit()
+    rig.config(t3_db=str(db), children={}, decision={"minutes": 30})
+    rig.run(T0)  # baseline
+    return rig, conn
+
+
+def test_unregistered_lead_report_wakes_its_launcher(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.2 at out/v9.2.docx", at(10))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(10))
+    add_run(conn, "orch-1", 1, "completed", at(11), at(12))  # the launcher ran, but a launched lead is never relayed
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert 'child "Lead: report" (mcp:lead-7) ended with a done: report' in w[0]["text"]
+
+
+def test_unregistered_lead_failure_wakes_its_launcher(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_run(conn, "mcp:lead-7", 2, "failed", at(5), at(10))
+    add_run(conn, "orch-1", 1, "completed", at(11), at(12))
+    rig.run(at(15))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+
+
+def test_thread_the_user_started_has_no_launcher(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_thread(conn, "mcp:user-chat", "Some chat", updated=at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('u0', 'mcp:user-chat', 'user', 0, ?, ?, ?)",
+                 (at(1), at(1), json.dumps({"text": "hi", "createdBy": "user"})))
+    conn.commit()
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('u1', 'mcp:user-chat', 'user', 0, ?, ?, ?)",
+                 (at(2), at(2), json.dumps({"text": "from a lead", "createdBy": "agent", "senderThreadId": "orch-1"})))
+    conn.commit()  # a later message from another thread does not make it a launched lead
+    add_message(conn, "a2", "mcp:user-chat", "assistant", "done: answered", at(10))
+    add_run(conn, "mcp:user-chat", 1, "failed", at(5), at(10))
+    rig.run(at(45))
+    assert rig.wakes() == []
+
+
+def test_launched_non_lead_chat_stays_top_level(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_thread(conn, "mcp:orch-2", "Orchestrator: research", updated=at(10))  # opened by another chat, not a lead
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('o0', 'mcp:orch-2', 'user', 0, ?, ?, ?)",
+                 (at(1), at(1), json.dumps({"text": "You are the orchestrator.", "createdBy": "agent",
+                                            "senderThreadId": "orch-1"})))
+    conn.commit()
+    add_message(conn, "a3", "mcp:orch-2", "assistant", "done: all set", at(10))
+    add_run(conn, "mcp:orch-2", 1, "failed", at(5), at(10))
+    rig.run(at(45))
+    assert rig.wakes() == []
+
+
+def test_lead_report_under_a_later_message_still_wakes_the_parent(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))  # the first run of the lead scan records without waking
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.4 at out/v9.4.docx", at(10))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "I re-read rule 6 and will reuse the builder.", at(12))
+    add_run(conn, "mcp:lead-7", 3, "completed", at(11), at(12))
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"
+    assert "done: report v9.4" in w[0]["text"]
+
+
+def test_lead_report_it_sent_itself_stays_quiet(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9 at out/v9.docx", at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('s1', 'orch-1', 'user', 0, ?, ?, ?)",
+                 (at(10), at(10), json.dumps({"text": "done: report v9 at out/v9.docx", "senderThreadId": "mcp:lead-7"})))
+    conn.commit()
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "Noted the account change.", at(12))
+    rig.run(at(45))
+    assert rig.wakes() == []
+
+
+def lead_send(conn, mid, text, when):
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?, 'orch-1', 'user', 0, ?, ?, ?)",
+                 (mid, when, when, json.dumps({"text": text, "senderThreadId": "mcp:lead-7"})))
+    conn.commit()
+
+
+def test_lead_sending_a_later_report_does_not_cover_an_earlier_one(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(9), at(10))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.2, lighter Recomendación in email wording",
+                at(10))
+    add_run(conn, "mcp:lead-7", 3, "completed", at(19), at(20))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "done: report v9.3, new per-order crop table", at(20))
+    lead_send(conn, "s1", "done: report v9.3, new per-order crop table", at(20))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "v9.2" in w[0]["text"] and "v9.3" not in w[0]["text"]
+
+
+def test_lead_wait_without_job_file_still_wakes_the_lead_after_a_sent_report(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(9), at(12))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report A", at(10))
+    lead_send(conn, "s1", "done: report A", at(10))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "waiting: 4101", at(12))
+    rig.run(at(45))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "mcp:lead-7"  # the no-job-file wake, as for any child
+
+
+def test_lead_report_buried_under_many_messages_still_wakes(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(9), at(20))
+    add_message(conn, "a0", "mcp:lead-7", "assistant", "done: report A", at(10))
+    for i in range(60):
+        add_message(conn, f"p{i:02d}", "mcp:lead-7", "assistant", f"progress {i}", at(11) if i < 30 else at(12))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "done: report A" in w[0]["text"]
+
+
+def test_lead_progress_send_in_the_turn_does_not_deliver_its_final_report(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn, "s1", "decision: which minimum size, 30 or 32 px?", at(8))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.4 with a 30 px minimum", at(20))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "done: report v9.4" in w[0]["text"]
+
+
+def test_lead_report_resent_in_a_later_turn_counts_as_delivered(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(10))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.2 with the email wording in out/v9.2", at(10))
+    add_run(conn, "mcp:lead-7", 3, "completed", at(30), at(31))
+    lead_send(conn, "s1", "done: report v9.2 with the email wording, file in out/v9.2", at(31))
+    rig.run(at(60))
+    assert rig.wakes() == []
+
+
+def test_lead_launched_by_a_lead_may_report_to_the_orchestrator(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_thread(conn, "mcp:sub-1", "Lead: workbook", updated=at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('b0', 'mcp:sub-1', 'user', 0, ?, ?, ?)",
+                 (at(1), at(1), json.dumps({"text": "You are the lead.", "createdBy": "agent",
+                                            "senderThreadId": "mcp:lead-7"})))
+    conn.commit()
+    rig.run(at(2))
+    add_run(conn, "mcp:sub-1", 1, "completed", at(5), at(10))
+    add_message(conn, "c1", "mcp:sub-1", "assistant", "done: workbook in SQLite", at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('s9', 'orch-1', 'user', 0, ?, ?, ?)",
+                 (at(10), at(10), json.dumps({"text": "done: workbook in SQLite", "senderThreadId": "mcp:sub-1"})))
+    conn.commit()
+    rig.run(at(60))
+    assert rig.wakes() == []  # sent to the orchestrator at the top of its launch chain
+    add_run(conn, "mcp:sub-1", 2, "failed", at(61), at(62))
+    rig.run(at(70))
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "orch-1"  # its parent is the top of the chain
+
+
+def test_title_starting_with_leader_is_not_a_lead(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    add_thread(conn, "mcp:board", "Leaderboard update", updated=at(10))
+    conn.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('d0', 'mcp:board', 'user', 0, ?, ?, ?)",
+                 (at(1), at(1), json.dumps({"text": "x", "createdBy": "agent", "senderThreadId": "orch-1"})))
+    conn.commit()
+    rig.run(at(2))
+    add_run(conn, "mcp:board", 1, "failed", at(5), at(10))
+    rig.run(at(30))
+    assert rig.wakes() == []
+
+
+def test_lead_report_of_another_version_does_not_deliver_this_one(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(9), at(10))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.2 at out/v9.2.docx", at(10))
+    add_run(conn, "mcp:lead-7", 3, "completed", at(19), at(20))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "done: report v9.3 at out/v9.3.docx", at(20))
+    lead_send(conn, "s1", "done: report v9.3 at out/v9.3.docx", at(20))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "v9.2" in w[0]["text"] and "v9.3" not in w[0]["text"]
+
+
+def test_same_report_matching():
+    sr = WATCH_MOD.same_report
+    assert not sr("done: report v9.3 at out/v9.3.docx", "done: report v9.2 at out/v9.2.docx")
+    assert sr("done: report v9.2 with the email wording, file in out/v9.2",
+              "done: report v9.2 with the email wording in out/v9.2")
+    assert not sr("done: ok", "done: report v9.2 with the email wording in out/v9.2")
+    assert not sr("done: report finished", "done: report v9.2 with the email wording in out/v9.2")
+
+
+def test_lead_deliverable_send_mid_turn_does_not_deliver_the_final_report(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn, "s1", "done: draft figures at out/fig.html, work continues", at(8))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: final report v10 at out/v10.docx", at(20))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "v10" in w[0]["text"]
+
+
+def test_two_reports_in_one_turn_with_only_the_second_sent(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(20))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: report v9.2 at out/v9.2.docx", at(10))
+    add_message(conn, "a2", "mcp:lead-7", "assistant", "done: report v9.3 at out/v9.3.docx", at(20))
+    lead_send(conn, "s1", "done: report v9.3 at out/v9.3.docx", at(20))
+    rig.run(at(60))
+    w = rig.wakes()
+    assert len(w) == 1 and "v9.2" in w[0]["text"] and "v9.3" not in w[0]["text"]
+
+
+def test_lead_report_sent_then_ended_with_a_reworded_copy_is_delivered(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn, "s1", "done: lab instances side by side. README: /tmp/perf-e5-20261107/tools/README.md", at(18))
+    lead_send(conn, "s2", "done: correction: each unit is 1.5 GB, not MB.", at(19))
+    add_message(conn, "a1", "mcp:lead-7", "assistant",
+                "done: one command now starts an isolated lab instance, and three ran side by side.", at(20))
+    rig.run(at(60))
     assert rig.wakes() == []
 
 
