@@ -1,0 +1,13 @@
+# orchestack retro scan: one weekly digest of agent tool errors. scripts/install.sh --retro writes this to
+# ~/.config/systemd/user/ with @REPO@ replaced by the checkout path. Started by orchestack-retro.timer.
+# The scan is read-only, calls no model and prints only totals. The digest goes to ~/.local/state/orchestack/retro/.
+[Unit]
+Description=orchestack retro scan (weekly digest of agent tool errors)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 -I @REPO@/retro/scan.py
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1800
+UMask=0077

@@ -34,7 +34,9 @@
         "EXIT"
       ],
       "lookup_command": "ssh cluster-login \"bash -l -s -- {jobs}\" < ~/src/orchestack/watcher/lsf_job_states.sh",
-      "globs": ["~/code/*/.work/orchestrator/jobs"]
+      "globs": [
+        "~/code/*/.work/orchestrator/jobs"
+      ]
     },
     "children": {
       "stuck_hours": 3,
@@ -68,5 +70,26 @@
       "hint": "Run tsh login."
     },
     "hosts": []
+  },
+  "retro": {
+    "days": 7,
+    "pc_tools": [
+      "^mcp__t3-code__"
+    ],
+    "owners": [
+      {
+        "name": "app assistant",
+        "cwd": [
+          "/\\.myapp-lab/workspaces/"
+        ],
+        "own_permissions": true
+      },
+      {
+        "name": "app assistant",
+        "cwd": [
+          "/src/myapp"
+        ]
+      }
+    ]
   }
 }

@@ -8,7 +8,7 @@
     {
       "name": "orchestack",
       "source": "./",
-      "description": "Orchestrator playbook, two-critic sol-loop, bulk image review, role-card and memory-gate hooks.",
+      "description": "Orchestrator playbook, two-critic sol-loop, bulk image review, UI loop, weekly tool-error retro, role-card and memory-gate hooks.",
       "category": "productivity",
       "keywords": ["orchestration", "t3code", "subagents", "review", "skills"]
     }

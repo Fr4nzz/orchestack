@@ -2,6 +2,8 @@
 # scrub_check.sh: fail if files that would be committed contain private identifiers.
 #
 #   scripts/scrub_check.sh [PATH ...]      (default: every tracked and untracked, non-ignored file)
+#   scripts/scrub_check.sh --unpushed       also the lines added by commits not yet on the upstream branch
+#                                           (a leak removed by a later commit still goes out with a push)
 #
 # Two pattern sets, both extended regexes:
 #   1. Built-in generic patterns below (host-like names, personal home and scratch paths, emails, job-id
@@ -24,6 +26,7 @@ GENERIC=(
   '\b[Jj]ob <?[0-9]{5,}>?'             # concrete job ids
   '\buid[ =]?[0-9]{4,}\b'               # numeric uids
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'   # thread, session and project ids
+  '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}\b'   # the start of such an id, copied into a fixture
   '\.ts\.net\b'                          # tailnet host names
 )
 
@@ -37,6 +40,9 @@ if [[ -f $PATTERN_FILE ]]; then
 else
   echo "note: no personal pattern file ($PATTERN_FILE). Only generic patterns are checked." >&2
 fi
+
+UNPUSHED=0
+if [[ ${1:-} == --unpushed ]]; then UNPUSHED=1; shift; fi
 
 if (( $# )); then
   mapfile -t FILES < <(printf '%s\n' "$@")
@@ -73,6 +79,18 @@ for p in "${GENERIC[@]}" "${PERSONAL[@]}"; do
     echo "== file name: $p"; echo "$names"; hits=$(( hits + $(echo "$names" | wc -l) ))
   fi
 done
+
+# lines added by unpushed commits (the patch text, not the current files)
+if (( UNPUSHED )); then
+  base=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
+  added=$(git log -p --format= "$base..HEAD" -- . ":(exclude)$SELF" | grep -E '^\+[^+]' || true)
+  for p in "${GENERIC[@]}"; do
+    if out=$(grep -nE -- "$p" <<<"$added"); then echo "== unpushed commits, generic: $p"; echo "$out" | head -20; hits=$(( hits + $(echo "$out" | wc -l) )); fi
+  done
+  for p in "${PERSONAL[@]}"; do
+    if out=$(grep -niE -- "$p" <<<"$added"); then echo "== unpushed commits, personal: $p"; echo "$out" | head -20; hits=$(( hits + $(echo "$out" | wc -l) )); fi
+  done
+fi
 
 if (( hits )); then echo "scrub_check: $hits hit(s) in ${#CHECK[@]} files"; exit 1; fi
 echo "scrub_check: clean (${#CHECK[@]} files, ${#GENERIC[@]} generic + ${#PERSONAL[@]} personal patterns)"

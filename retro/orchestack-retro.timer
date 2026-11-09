@@ -1,0 +1,12 @@
+# orchestack retro scan: Mondays at 06:00 local time, or at the next boot if the machine was off then.
+# Enabled only by scripts/install.sh --retro. The judge step (the retro skill) is scheduled separately.
+[Unit]
+Description=orchestack retro scan every Monday 06:00
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

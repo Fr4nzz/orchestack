@@ -2,6 +2,19 @@
 
 ## 0.2.0 (unreleased)
 
+- `retro/scan.py` and `skills/retro`: a weekly retro of the tool errors agents worked around. The scan (stdlib, no
+  model calls, about 30 s a week) clusters failed tool results from Claude Code and Codex transcripts by category,
+  tool and owner (this PC, configured owners such as an app assistant, each project repo), leaves out fine cases and
+  writes a private digest with counts, the change since the previous week's digest and 3 redacted examples per
+  cluster. It reads the shell and MCP results inside Codex `exec` scripts one result at a time.
+- `scrub_check.sh --unpushed`: also checks the lines that unpushed commits added, and ids are caught by their first
+  three groups.
+  `install.sh --retro` adds a systemd `--user` timer for Mondays 06:00. The skill proposes at most 3 fixes per
+  owner, tool first and CLAUDE.md last, and sends them to the owner's orchestrator or the maintainer.
+- `watcher/wait_for.py`: waits for a check command inside one tool call (`--every 30 --timeout 420`) instead of
+  `sleep` and then a check. Checks go on until the timeout (the wait halves when less than an interval is left),
+  each check gets only the time left, a success after the timeout counts as a timeout, and a check past it, or
+  running when wait_for is stopped, is killed with its children.
 - `skills/ui-loop`: a UI improvement loop distilled from several runs (owner taste, viewport shots and metrics,
   a hands-on pass acting as the user, two critics per round with rotating lenses, one implementer, re-measure), with
   `references/principles.md`, brief templates, and `scripts/ui_shoot.mjs` + `ui_metrics.js` (contrast, taps,

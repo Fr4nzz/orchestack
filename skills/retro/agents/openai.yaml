@@ -1,0 +1,4 @@
+interface:
+  display_name: "Retro (weekly tool errors)"
+  short_description: "Read the weekly tool-error digest and propose at most 3 fixes per owner"
+  default_prompt: "Use $retro to read this week's tool-error digest and send the fix proposals."

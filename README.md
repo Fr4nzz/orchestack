@@ -39,6 +39,7 @@ plan's usage meter) found:
 | `skills/ui-loop` | "ui loop", "improve the UI" | Owner taste first, shots and metrics at real screen sizes, a hands-on pass acting as the user, two critics per round with rotating lenses, one implementer, re-measure. `scripts/ui_shoot.mjs` shoots and measures each view. |
 | `hooks/role_card.py` | Claude Code `SessionStart` (`startup`, `resume`, `compact`) | Prints a 7-line role card into context for orchestrator and lead chats, so the role survives compaction. |
 | `watcher/watch.py` | systemd `--user` timer, every 15 min (opt-in) | Wakes a chat only when something changed: jobs ended, a child failed, low disk, weekly reset or behind pace, an unanswered `decision:`. No model calls. |
+| `retro/scan.py` + `skills/retro` | systemd `--user` timer, Mondays 06:00 (opt-in), then "retro" | The scan clusters the week's tool errors by owner (this PC, an app assistant, each project) into a private digest, free. The skill reads it and proposes at most 3 fixes per owner, tool first, CLAUDE.md last. |
 | `hooks/memory_gate.py` | Claude Code `PreToolUse` on `Agent`, `delegate_task`, `t3_thread_launch` | Denies a local dispatch when free RAM is under a threshold (default 3 GiB). Never counts agents. |
 
 The hooks use only the Python standard library, exit 0 on every error, and take about 20 ms.
@@ -64,7 +65,8 @@ git clone <this repo> ~/src/orchestack
    chats (told 'you are the orchestrator', or titled Orchestrator:/Lead:): load the `orchestrator` skill at start
    and again after every compaction."
 
-`--watcher` (off by default) also installs the change-only watcher (see below). `--uninstall` reverses all of it and restores the newest backups. `--keep-old` leaves superseded skills in place.
+`--watcher` (off by default) also installs the change-only watcher (see below). `--retro` (off by default)
+installs the weekly retro scan (see Retro). `--uninstall` reverses all of it and restores the newest backups. `--keep-old` leaves superseded skills in place.
 A Claude Code plugin manifest (`.claude-plugin/`, `hooks/hooks.json`) is included but less tested than the script.
 Use one method, not both. Codex gets the skills only (the hooks are Claude Code hooks).
 
@@ -127,16 +129,52 @@ run it before stopping work for budget, and give lanes pace conditions instead o
 prompt points the orchestrator at `.work/orchestrator/IDEAS.md` (format in the orchestrator skill's
 `references/backlog.md`).
 
+## Retro
+
+Agents work around the tool errors they hit and rarely say so. `retro/scan.py` finds them without a model: it reads
+the Claude Code transcripts of every `~/.claude*/projects` (skipping `api-request*` lines) and Codex sessions from
+the last 7 days (also the shell and MCP results inside Codex `exec` scripts, each with its own exit code and
+output), keeps the failed tool results, and leaves out the fine ones (a rejected or interrupted call, a call
+cancelled after a sibling failed, exit 1 from grep, diff or test). It groups the rest by category and tool (for MCP,
+server and tool), and by owner:
+
+- a configured owner whose working directories match `retro.owners` (e.g. an app assistant's workspaces),
+- "this PC" for interpreters, venvs, PATH, hooks, permission rules, missing commands and the tools in
+  `retro.pc_tools`, wherever they happened,
+- otherwise the git repository of the working directory.
+
+The digest, `~/.local/state/orchestack/retro/<date>.md` (mode 0600), lists per cluster the count, the change since
+the digest of the previous week (none after a gap, and an extra manual run is never the baseline) and up to 3
+examples (session, transcript line, tool, the first 300 characters of the error with secrets redacted: tokens with
+known prefixes, whole cookie and authorization headers, JWTs, private keys, credentials and webhooks in URLs,
+password, token and key flags and values (quoted ones whole, `*_KEY=`, `*_TOKEN=`, `*_SECRET=`, `login -p`), long
+hex and base64 runs). Redaction is pattern based, so keep the digest private. It never copies transcripts. One week of about 6 GB of
+transcripts takes about 30 s.
+
+```bash
+retro/scan.py --days 7                    # writes today's digest and prints its path
+scripts/install.sh --dry-run --retro      # then without --dry-run: Mondays 06:00, catches up after a shutdown
+systemctl --user list-timers orchestack-retro.timer
+```
+
+The judge step is the `retro` skill. Schedule it yourself (e.g. a T3 scheduled task on Monday morning that says
+"retro"). It reads the digest, opens a transcript only at a cited line, and sends each owner at most 3 proposals:
+the tool, its description or its error message first, then this PC's setup, then a skill, and CLAUDE.md or
+AGENTS.md last. It changes nothing itself.
+
 ## Development
 
 ```bash
 git config core.hooksPath .githooks   # pre-commit runs the scrub check and lint
 scripts/lint.sh                        # frontmatter, size budgets, JSON, bash -n, Python syntax, prose rules
 scripts/scrub_check.sh                 # no personal data in the repo
+scripts/scrub_check.sh --unpushed      # also in the lines that unpushed commits added: run it before a push
 python3 -m pytest tests                # or: uvx pytest tests
 ```
 
-Put your own names, hosts, project names and ids in the git-ignored `.scrub-patterns.local` (one regex per line).
+Put your own names, hosts, project names (private repositories too) and ids in the git-ignored
+`.scrub-patterns.local` (one regex per line). Write test fixtures with invented names, never ones copied from a
+transcript.
 
 ## Status
 
