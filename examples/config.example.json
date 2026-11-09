@@ -2,7 +2,8 @@
   "memory_gate": {
     "enabled": true,
     "min_available_gib": 3.0,
-    "swap_weight": 0.0
+    "swap_weight": 0.0,
+    "recheck_s": 3.0
   },
   "role_card": {
     "t3_state_db": "~/.t3/userdata/statev2.sqlite",

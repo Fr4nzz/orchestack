@@ -2,6 +2,7 @@
 
 Run: python3 -m pytest tests   (or: uvx pytest tests)
 """
+import importlib.util
 import json
 import os
 import sqlite3
@@ -125,7 +126,8 @@ def gate(tmp_path, avail_kb, swap_kb=0, cfg=None, tool="Agent", tool_input=None)
     mi = tmp_path / "meminfo"
     mi.write_text(MEMINFO.format(avail=avail_kb, swap=swap_kb))
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input or {}}
-    p, _ = run(MEMORY_GATE, json.dumps(event), {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi)})
+    p, _ = run(MEMORY_GATE, json.dumps(event), {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi),
+                                                "ORCHESTACK_GATE_RECHECK_S": "0"})
     assert p.returncode == 0
     return p.stdout
 
@@ -274,3 +276,95 @@ def test_install_refuses_bad_retire_names(tmp_path):
     p = subprocess.run(["bash", str(REPO / "scripts" / "install.sh"), "--dry-run", "--retire=a,,b"],
                        env=env, capture_output=True, text=True)
     assert p.returncode == 0 and "mv --" not in p.stdout
+
+
+def test_gate_denial_names_the_largest_processes(tmp_path):
+    reason = json.loads(gate(tmp_path, 2 * GIB))["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Largest processes:" in reason and "GiB" in reason
+    assert "(pid " in reason or " processes)" in reason
+
+
+def write_meminfo(path, avail_kb):
+    """Atomic, so a read during the re-check never sees a half-written file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(MEMINFO.format(avail=avail_kb, swap=0))
+    os.replace(tmp, path)
+
+
+def test_gate_allows_when_memory_frees_during_the_recheck(tmp_path):
+    import threading
+    cdir = tmp_path / "cfg"
+    write_cfg(cdir)
+    mi = tmp_path / "meminfo"
+    write_meminfo(mi, 2 * GIB)
+    event = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {}})
+    threading.Timer(0.4, lambda: write_meminfo(mi, 8 * GIB)).start()
+    p, _ = run(MEMORY_GATE, event, {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi),
+                                    "ORCHESTACK_GATE_RECHECK_S": "2"})
+    assert p.returncode == 0 and p.stdout == ""
+
+
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_gate_default_denial_stays_under_the_hook_timeout(tmp_path):
+    cdir = tmp_path / "cfg"
+    write_cfg(cdir)
+    mi = tmp_path / "meminfo"
+    write_meminfo(mi, 2 * GIB)
+    event = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {}})
+    p, dt = run(MEMORY_GATE, event, {"ORCHESTACK_CONFIG_DIR": str(cdir), "ORCHESTACK_MEMINFO": str(mi)})
+    assert "deny" in p.stdout and dt < 4.5, dt
+
+
+def test_gate_caps_an_oversized_recheck_to_the_deadline(tmp_path, monkeypatch):
+    mg = load(MEMORY_GATE, "memory_gate_cap")
+    cdir = tmp_path / "cfg"
+    write_cfg(cdir, cfg={"memory_gate": {"recheck_s": 8}})
+    mi = tmp_path / "meminfo"
+    write_meminfo(mi, 2 * GIB)
+    slept = []
+    monkeypatch.setenv("ORCHESTACK_CONFIG_DIR", str(cdir))
+    monkeypatch.setenv("ORCHESTACK_MEMINFO", str(mi))
+    monkeypatch.delenv("ORCHESTACK_GATE_RECHECK_S", raising=False)
+    monkeypatch.setattr(mg.time, "sleep", slept.append)
+    monkeypatch.setattr(mg, "largest_processes", lambda *a, **k: "")
+    monkeypatch.setattr(mg.sys, "stdin", __import__("io").StringIO("{}"))
+    out = __import__("io").StringIO()
+    monkeypatch.setattr(mg.sys, "stdout", out)
+    mg.main()
+    assert "deny" in out.getvalue()
+    assert len(slept) == 2 and sum(slept) <= 3.0, slept
+
+
+def test_gate_process_scan_stops_at_the_deadline(monkeypatch):
+    mg = load(MEMORY_GATE, "memory_gate_scan")
+    monkeypatch.setattr(mg.os, "listdir", lambda _: [str(n) for n in range(1, 2001)])
+
+    def slow_rss(pid):
+        time.sleep(0.01)
+        return 1024
+
+    monkeypatch.setattr(mg, "process_rss_kb", slow_rss)
+    monkeypatch.setattr(mg, "process_name", lambda pid: "node")
+    t0 = time.monotonic()
+    top = mg.largest_processes(3, t0 + 0.2)
+    assert time.monotonic() - t0 < 0.5 and top.startswith("node ")
+
+
+def test_gate_names_a_process_by_its_command_not_its_thread_name():
+    mg = load(MEMORY_GATE, "memory_gate_name")
+    child = subprocess.Popen([sys.executable, "-c", "import ctypes, time\n"
+                              "ctypes.CDLL(None).prctl(15, b'MainThread', 0, 0, 0)\n"
+                              "print('ok', flush=True)\ntime.sleep(30)"], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ok"
+        assert Path(f"/proc/{child.pid}/comm").read_text().strip() == "MainThread"
+        assert mg.process_name(str(child.pid)).startswith("python")
+    finally:
+        child.kill()
+        child.wait()

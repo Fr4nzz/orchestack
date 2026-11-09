@@ -40,9 +40,10 @@ plan's usage meter) found:
 | `hooks/role_card.py` | Claude Code `SessionStart` (`startup`, `resume`, `compact`) | Prints a 7-line role card into context for orchestrator and lead chats, so the role survives compaction. |
 | `watcher/watch.py` | systemd `--user` timer, every 15 min (opt-in) | Wakes a chat only when something changed: jobs ended, a child failed, low disk, weekly reset or behind pace, an unanswered `decision:`. No model calls. |
 | `retro/scan.py` + `skills/retro` | systemd `--user` timer, Mondays 06:00 (opt-in), then "retro" | The scan clusters the week's tool errors by owner (this PC, an app assistant, each project) into a private digest, free. The skill reads it and proposes at most 3 fixes per owner, tool first, CLAUDE.md last. |
-| `hooks/memory_gate.py` | Claude Code `PreToolUse` on `Agent`, `delegate_task`, `t3_thread_launch` | Denies a local dispatch when free RAM is under a threshold (default 3 GiB). Never counts agents. |
+| `hooks/memory_gate.py` | Claude Code `PreToolUse` on `Agent`, `delegate_task`, `t3_thread_launch` | Denies a local dispatch when free RAM is under a threshold (default 3 GiB), after two more reads over about 3 s. Names the largest processes. Never counts agents. |
 
-The hooks use only the Python standard library, exit 0 on every error, and take about 20 ms.
+The hooks use only the Python standard library, exit 0 on every error (they then allow the call), and take about
+20 ms. The memory gate takes up to 3.5 s when it denies.
 
 ## Install
 
@@ -81,7 +82,8 @@ Everything personal lives outside the repo, in `~/.config/orchestack/` (or `$ORC
   `T3CODE_THREAD_ID`. `none` silences a chat whose title would otherwise match.
 - `config.json`: hook settings. See `examples/config.example.json`.
   - `memory_gate.min_available_gib` (default 3.0), `memory_gate.swap_weight` (default 0, counts that share of
-    free swap as available), `memory_gate.enabled`.
+    free swap as available), `memory_gate.recheck_s` (default 3, the seconds over which it reads memory twice more
+    before denying, capped at 3), `memory_gate.enabled`.
   - `role_card.t3_state_db`: optional path to T3's state database. If set, a chat whose title starts with
     `Orchestrator:` or `Lead:` gets the card too. The hook opens it read-only and looks up one row by primary key.
     It never scans (the database can be tens of GB) and skips silently on any error.
