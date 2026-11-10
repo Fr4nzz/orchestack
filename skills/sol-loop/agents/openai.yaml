@@ -1,4 +1,4 @@
 interface:
   display_name: "Sol Loop (two critics)"
-  short_description: "Two independent critics per round (GPT Sol + fresh Opus), smallest fixes"
+  short_description: "Two independent critics per round (GPT Sol + a fresh Claude critic), smallest fixes"
   default_prompt: "Use $sol-loop to review this change with both critics and fix what they find."

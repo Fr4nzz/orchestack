@@ -13,13 +13,13 @@ them. Be careful of scope creep and don't be scared to push back.
 
 ## Critics
 
-- **Always two reviews per round:** GPT Sol and Opus, each in a fresh context with the same brief and sources but
-  without your reasoning or the other critic's findings. They find different mistakes, so every round uses both.
+- **Always two reviews per round:** GPT Sol and a Claude critic, each in a fresh context with the same brief and sources but
+  without your reasoning or the other critic's findings. They find different mistakes.
   For a small revision, narrow the scope to the diff or changed sections instead.
 - **Applies to code, writing, analyses, plots and UI.** For code, accept either critic's fix only after the tests or
   checks pass with it.
-- **Models:** use the pinned ids from `local.md`. Without a pin, pick the current Sol and Opus from
-  `orchestrator_capabilities`. Never hardcode an id or move to a newer or pricier model on your own (suggest it).
+- **Models:** use the pinned ids from `local.md`. Without a pin, pick the current Sol and Claude models from
+  `orchestrator_capabilities`. Never hardcode an id or switch to a newer or pricier model unasked (suggest it).
 
 ## Budget
 
@@ -55,7 +55,7 @@ In T3, call `orchestrator_capabilities`, then `delegate_task` once per critic in
 (medium by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use
 `t3_thread_send`, `create_threads` or `t3_thread_launch` for review.
 
-Outside T3, use native subagents that actually run each model. If no route runs Sol (or Opus), the round cannot
+Outside T3, use native subagents that actually run each model. If no route runs Sol (or Claude), the round cannot
 pass. Report it as waiting for that critic and rerun it when back. Never substitute another model or pass a round
 on one review.
 
@@ -128,7 +128,7 @@ tstack `council`) of the critics that completed. Write `no score` when one gave 
 | Critic | Round 1 | Round 2 |
 |---|---|---|
 | GPT Sol | 8/10 | 9/10 |
-| Opus | 7/10 | 9/10 |
+| Claude | 7/10 | 9/10 |
 ```
 
 Then material fixes, declined and unresolved findings with reasons, and validation gaps. Link the ledger (models,

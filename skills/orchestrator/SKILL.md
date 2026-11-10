@@ -156,7 +156,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     model at medium effort suits well-specified work, a small one only read-only scouting, script-verified results
     or a calibrated image first pass (`bulk-image-review`), never final judgement.
 19. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
-    independent reviews per round (GPT Sol and a fresh Opus).
+    independent reviews per round (GPT Sol and a fresh Claude critic).
 
 ## Backlog
 

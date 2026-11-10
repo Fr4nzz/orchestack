@@ -60,7 +60,7 @@ Act as the target user, in a real headless browser, on the copy of the data:
 
 ## 3. Critic rounds (two critics, rotating lenses)
 
-Each round runs `sol-loop`: GPT Sol and a fresh Opus, in parallel, with the same brief (`references/briefs.md`),
+Each round runs `sol-loop`: GPT Sol and a fresh Claude, in parallel, with the same brief (`references/briefs.md`),
 review only. They get the shots, the metrics, the taste evidence, the pass bars and the live URL (Playwright
 allowed for hover, focus, widths and the lightbox). Each gives an overall score from 1 to 10, category scores and
 up to 15 findings (blocker, should or nit) with evidence and the smallest fix. Never tell critics a target score.
