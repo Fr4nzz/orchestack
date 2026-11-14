@@ -20,9 +20,7 @@ owns it. The same state never wakes anyone twice.
             thread send from the child there) for 30 min -> its parent (noted:/waiting: never, nor a handoff: while
             the child owns an open job file); a waiting: naming jobs no job file lists -> the child, once
   expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owner
-            of the oldest open job file, once per expiry (urgent, opt-in). Optional "supervised": under
-            minutes (90) left, or at evening (21:30) when it would end before morning (08:00) -> the
-            orchestrator, to get a renewal a person approves while awake
+            of the oldest open job file, once per expiry (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
@@ -1270,8 +1268,6 @@ def check_expiry(ctx):
                 else f"{name} valid for {mins} min more (until {when}).{hint}")
     ctx.note(f"expiry: {name} " + (f"{int(left.total_seconds() // 60)} min left" if left is not None
                                    else "no validity found"))
-    if left is not None and expiry_supervised(ctx, sec, st, name, until, left):
-        return  # the owner's own warning waits a run, so two logins do not start at once
     if left is not None and left >= warn:
         st.pop("warned", None)
         st.pop("warned_to", None)  # written by older versions
@@ -1285,43 +1281,6 @@ def check_expiry(ctx):
     st.pop("warned_to", None)
     for t in targets:
         ctx.wake(t, "expiry", text, urgent=True)
-
-
-def expiry_supervised(ctx, sec, st, name, until, left):
-    """Ask for a renewal a person approves (e.g. a phone push) while they are likely awake, before an unattended
-    one can fail at night. Optional `supervised` ({} or true for the defaults): when less than `minutes` (90)
-    are left, and once per evening from `evening` (21:30, local) when the login ends before `morning` (08:00)
-    the next day. Wakes `thread` (default the orchestrator), urgent, once per expiry time and once per evening.
-    The caller runs it only while a job file is open (with only_with_jobs). -> True when it woke."""
-    sup = sec.get("supervised")
-    if not sup or left <= timedelta(0):
-        return False
-    sup = sup if isinstance(sup, dict) else {}
-    thread = sup.get("thread") or ctx.orchestrator
-    hint = short(sup.get("hint") or "Ask the user to approve a supervised renewal now.", 200)
-    when = until.astimezone(ctx.tz).strftime("%Y-%m-%d %H:%M")
-    mins = int(left.total_seconds() // 60)
-    prev = st.get("supervised")
-    if left < timedelta(minutes=float(sup.get("minutes", 90))):
-        if prev and abs(parse_iso(prev) - until) <= timedelta(minutes=5):
-            return False
-        st["supervised"] = iso(until)
-        ctx.wake(thread, "expiry", f"{name} valid for {mins} min more (until {when}) while cluster jobs are"
-                                   f" registered. {hint}", urgent=True)
-        return True
-    local = ctx.now.astimezone(ctx.tz)
-    today = local.date().isoformat()
-    if local.hour * 60 + local.minute < hhmm(sup.get("evening", "21:30")) or st.get("evening") == today:
-        return False
-    morning = hhmm(sup.get("morning", "08:00"))
-    next_morning = (local + timedelta(days=1)).replace(hour=morning // 60, minute=morning % 60, second=0,
-                                                       microsecond=0)
-    if until > next_morning:
-        return False
-    st["evening"] = today
-    ctx.wake(thread, "expiry", f"{name} runs out overnight (at {when}) while cluster jobs are registered. {hint}",
-             urgent=True)
-    return True
 
 
 def check_hosts(ctx):

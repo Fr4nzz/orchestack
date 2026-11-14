@@ -16,7 +16,6 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
 | `decision` | the child's parent | a child's report never reached the parent |
 | `decision` | the child itself | a child waits on cluster jobs that no job file lists |
 | `expiry` | the owner of the oldest open job file, urgent | a login is about to expire or has expired (off unless configured) |
-| `expiry` | the orchestrator, urgent | with `supervised`: a login ends within 90 min, or overnight (asked in the evening) |
 | `hosts` | nobody | a host's `probe` succeeds after failing: its `on_online` command runs (e.g. a copy) |
 
 ### `jobs`
@@ -72,13 +71,6 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
   logins at once.
 - `"only_with_jobs": false` restores the old behaviour: always checked, and it wakes the orchestrator (or
   `thread`).
-- Optional `supervised` (`{}` for the defaults) asks for a renewal a person approves (e.g. a phone push) while they
-  are likely awake, before an unattended one can fail at night. It wakes the orchestrator (or `supervised.thread`),
-  urgent, with `supervised.hint`:
-  - once per expiry time when less than `minutes` (90) are left. The owner's own warning then waits one run, so
-    two logins do not start at once;
-  - once per evening from `evening` (`"21:30"`, in `timezone`) when the login ends before `morning` (`"08:00"`)
-    the next day.
 - Example: `{"command": ["tsh", "status"], "pattern": "Valid until:\\s+(\\S+ \\S+ [+-]\\d{4})", "name": "tsh", "hint": "Run tsh login."}`
 
 ## Job files

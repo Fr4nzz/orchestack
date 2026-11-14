@@ -1640,67 +1640,6 @@ def test_expiry_state_from_before_warned_to_does_not_repeat(tmp_path):
     assert rig.wakes() == []
 
 
-def supervised_rig(tmp_path, left_text, **sup):
-    rig, out = expiry_rig(tmp_path, left_text)
-    rig.config(timezone="UTC", expiry={"command": rig.script("status.py", f"print(open({str(out)!r}).read(), end='')\n"),
-                                       "name": "tsh", "hint": "Run tsh login.", "only_with_jobs": False,
-                                       "pattern": r"Valid until:\s+(\S+ \S+ [+-]\d{4})",
-                                       "supervised": {"hint": "Ask for a supervised renewal.", **sup}})
-    return rig, out
-
-
-def test_expiry_supervised_asks_the_orchestrator_before_the_owner_warning(tmp_path):
-    rig, out = supervised_rig(tmp_path, "  Valid until: 2026-01-07 14:00:00 +0000\n")
-    rig.run(T0)  # 120 min left
-    assert rig.wakes() == []
-    rig.run(at(35))  # 85 min left
-    assert rig.wakes() == [{"thread": "orch-1", "text": "watcher: expiry: tsh valid for 85 min more (until 2026-01-07"
-                                                        " 14:00) while cluster jobs are registered. Ask for a"
-                                                        " supervised renewal."}]
-    rig.run(at(40))
-    assert rig.wakes() == []  # once per expiry time
-    rig.run(at(75))  # 45 min left: the ordinary warning still follows
-    w = rig.wakes()
-    assert len(w) == 1 and "tsh valid for 45 min more (until 2026-01-07 14:00). Run tsh login." in w[0]["text"]
-    out.write_text("  Valid until: 2026-01-07 14:40:00 +0000\n")  # renewed for a short while: a new ask
-    rig.run(at(80))
-    w = rig.wakes()
-    assert len(w) == 1 and "valid for 80 min more (until 2026-01-07 14:40)" in w[0]["text"]
-
-
-def test_expiry_supervised_both_due_at_once_sends_only_the_supervised_ask(tmp_path):
-    rig, out = supervised_rig(tmp_path, "  Valid until: 2026-01-07 12:30:00 +0000\n")
-    rig.run(T0)
-    w = rig.wakes()
-    assert len(w) == 1 and "Ask for a supervised renewal." in w[0]["text"]
-    rig.run(at(15))  # the owner's warning a run later
-    w = rig.wakes()
-    assert len(w) == 1 and "Run tsh login." in w[0]["text"]
-
-
-def test_expiry_supervised_evening_wake_when_it_ends_overnight(tmp_path):
-    rig, out = supervised_rig(tmp_path, "  Valid until: 2026-01-08 03:00:00 +0000\n", evening="21:30")
-    rig.run(T0)
-    rig.run(at(9 * 60 + 15))  # 21:15
-    assert rig.wakes() == []
-    rig.run(at(9 * 60 + 30))  # 21:30
-    w = rig.wakes()
-    assert w == [{"thread": "orch-1", "text": "watcher: expiry: tsh runs out overnight (at 2026-01-08 03:00) while"
-                                              " cluster jobs are registered. Ask for a supervised renewal."}]
-    rig.run(at(9 * 60 + 45))
-    assert rig.wakes() == []  # once per evening
-    (tmp_path / "e").mkdir()
-    rig2, out2 = supervised_rig(tmp_path / "e", "  Valid until: 2026-01-08 09:30:00 +0000\n")
-    rig2.run(at(9 * 60 + 40))
-    assert rig2.wakes() == []
-
-
-def test_expiry_supervised_is_off_without_its_section(tmp_path):
-    rig, out = expiry_rig(tmp_path, "  Valid until: 2026-01-07 13:20:00 +0000\n")  # 80 min left
-    rig.run(T0)
-    assert rig.wakes() == []
-
-
 # ---------- job files from any project ----------
 
 def test_jobs_from_the_shared_dir_and_globs(tmp_path):
