@@ -888,6 +888,8 @@ def usage_account(ctx, sec, st, baseline, rc, out, err, prompt, name):
         ctx.wake(ctx.orchestrator, "usage", f"{label}weekly usage reset ({pct:.0f} % used now, was {prev:.0f} %).",
                  prompt=prompt)
         st["reset_at"] = st["behind_at"] = iso(ctx.now)
+    elif sec.get("pace") is False:  # used as needed up to 100 %, then reset by hand: no pace wakes
+        ctx.note(f"usage{' ' + name if name else ''}: {pct:.0f} % used (no pace)")
     elif cycle:
         days = (ctx.now - cycle).total_seconds() / 86400
         left_h = hours_to_reset(ctx.now, sec["weekly_reset"], ctx.tz)[1]
@@ -1526,6 +1528,11 @@ def pace_lines(cfg, now):
             continue
         pct = float(m.group(1))
         read += 1
+        if acc.get("pace") is False:
+            verdict = ("at the 100 % mark: start no new work until it is reset" if pct >= PACE_FULL
+                       else "no pace: use it as needed up to 100 %")
+            lines.append(f"{label}: {pct:.0f} % used. {verdict}.")
+            continue
         if not acc.get("weekly_reset"):
             lines.append(f"{label}: {pct:.0f} % used (no weekly_reset configured, so no pace)")
             continue

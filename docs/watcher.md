@@ -32,9 +32,11 @@ Each check is enabled by its section in `config.json` under `watcher`. Details f
 - It wakes when the weekly meter resets, when usage is `behind_by` points behind `pace_per_day`, or once per cycle
   when, within `use_before_reset_h` (12) of the next `weekly_reset`, less than `use_before_reset_below` (90) % is
   used (what is left is lost at the reset).
+- `pace: false` (per account too): the account is used as needed up to 100 % and reset by hand. It gets no
+  behind or unused wakes, `pace` says "use it as needed", and a reset still wakes.
 - Several plan accounts: list the others in `accounts`.
   - Each entry reads the same meter output and needs a unique `name` and its own `weekly_pattern`.
-  - It may set `weekly_reset`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours`, otherwise they come
+  - It may set `weekly_reset`, `pace`, `pace_per_day`, `behind_by`, `reset_drop` or `rearm_hours`, otherwise they come
     from the section.
   - With `accounts` set, the section itself needs an explicit `weekly_pattern`.
   - Their wakes start with `[name]`.

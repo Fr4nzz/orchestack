@@ -1138,6 +1138,21 @@ def test_usage_far_behind_pace_rearms_daily(tmp_path):
     assert rig.wakes() == []
 
 
+def test_usage_without_pace_never_wakes_behind_or_unused(tmp_path):
+    # pace false: used as needed and reset by hand, so neither "far behind" nor "lost unless used" wakes
+    rig, meter = usage_rig(tmp_path, 30, weekly_reset="Mon 00:00", pace_per_day=15, behind_by=20)
+    usage = json.loads((rig.cfg_dir / "config.json").read_text())["watcher"]["usage"]
+    rig.config(usage={**usage, "pace": False}, timezone="UTC")
+    rig.run(T0)
+    rig.run(at(24 * 60 + 5))
+    rig.run(at(4 * 24 * 60 + 10))  # Sunday, within 12 h of the reset
+    assert rig.wakes() == []
+    meter.write_text("1")  # a manual reset still wakes with the backlog prompt
+    rig.run(at(4 * 24 * 60 + 30))
+    w = rig.wakes()
+    assert len(w) == 1 and "weekly usage reset (1 % used now, was 30 %)" in w[0]["text"]
+
+
 def test_usage_second_account_has_own_state_and_label(tmp_path):
     rig = Rig(tmp_path)
     m1, m2 = tmp_path / "a.txt", tmp_path / "b.txt"
@@ -2233,6 +2248,19 @@ def test_pace_verdicts_per_account(tmp_path):
     assert other.startswith("other: 70 % used, pace 95 % by now, reset in 8 h") and "28 % left before the reset" in other
     # third: 2 days in (pace 29 %), used 50 %: ahead
     assert "ahead of pace by 21 points" in third and "start no optional work" in third
+
+
+def test_pace_off_says_use_as_needed_until_100(tmp_path):
+    rig = Rig(tmp_path)
+    cmd = rig.script("meter.py", "print('seven_day used 40 %')\nprint('full seven_day used 99 %')\n")
+    rig.config(usage={"command": cmd, "weekly_pattern": r"^seven_day\s+used\s+([0-9.]+)", "weekly_reset": "Sun 12:00",
+                      "pace": False,
+                      "accounts": [{"name": "full", "weekly_pattern": r"^full seven_day\s+used\s+([0-9.]+)"}]})
+    p = pace_run(rig, T0)
+    assert p.returncode == 0, p.stderr
+    main, full, _ = p.stdout.strip().splitlines()
+    assert main == "main: 40 % used. no pace: use it as needed up to 100 %."
+    assert full == "full: 99 % used. at the 100 % mark: start no new work until it is reset."
 
 
 def test_pace_without_meter_config(tmp_path):
