@@ -23,6 +23,20 @@ the user's request for a new thread that T3's own instructions ask for.
    `Lead:` (up a chain of leads to the first other thread), so keep that title.
 3. Run it again with `--remove` when the lane is done.
 
+## Phases and context
+
+A lead, and any delegate that coordinates others, runs one phase per agent: for example research and drafting,
+then building, then review fixes. Each phase agent ends at its gate with a short `STATE.md` (under about 5k
+characters: what is approved, what is next, paths) and its report, and the lead starts a fresh agent for the next
+phase. A phase agent whose context passes about 200k *(default)* writes `STATE.md` and returns `handoff:` instead
+of continuing. A brief never hands one agent a whole multi-phase version. One measured project had delegates that ran
+a whole version peak at 458k to 689k, where the context above 200k was the largest single cost.
+
+Keep reads bounded at every level: read files only for decisions you make yourself, read long workflow or brief
+files by section (`grep -n`, then a line range), and use `t3_thread_read` with a small `maxCharsPerItem`. Start the
+two critics of a round together and wait for both, so a round costs one wake, and open their files only for the
+findings you will act on.
+
 ## Cost
 
 A launched lead has no completion relay, so its turn ends wake no one. The cost moves to the lead's sends, listed in

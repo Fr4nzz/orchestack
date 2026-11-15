@@ -123,6 +123,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     Command safety: absolute paths. No cd in compound commands. No rm of globs, variables or relative paths. Fresh timestamped output folders. No git commit -a, git reset --hard, git clean or force pushes.
     If command syntax triggers an approval prompt, use an equivalent permitted form. If the action itself needs permission, wait for it.
     Report to your parent only done:, failed:, decision: or handoff:, starting with that word. Never send waiting: or noted:.
+    Final report: 6 lines at most (verdict, counts, your file's path). Full findings stay in the file.
     Launched rather than delegated (a lead): send every report (t3_thread_send, mode "queue"), whatever started the turn. T3 never relays your turns.
     Delegated: send it when the watcher, a scheduled wake or your own delegate's completion notice started this turn. Otherwise end the turn with it.
     A deliverable the user is meant to open or review: send "done: <what> <link>, work continues" at once (t3_thread_send, mode "queue") and keep working. One that ends your task is your final report.

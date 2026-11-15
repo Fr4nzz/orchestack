@@ -17,9 +17,14 @@ step it names.
 - Pilot cluster jobs on one part for memory and runtime, then size the rest. Put a manifest of expected job ids and
   the fallback in the brief.
 - For repeated waves, pilot a cheaper model against the default on one batch and keep it if a spot check passes.
+- Before launching more than two leads or a wave of delegates, read the usage meter (and `watch.py pace` where
+  `local.md` sets a pace) and any per-task quota the work spends, such as a voice or API balance. Launch what fits
+  the 5-hour and weekly windows and queue the rest.
 
 ## Recovery (after an outage, a move, a restart or an expired login)
 
+- After an interrupted `delegate_task` call, check `task_status` once before sending it again: the child may
+  already be running or done, and a second send starts a duplicate.
 - After an outage (full disk, provider failure, harness restart), fix what still fails, then resume what broke,
   checking for uncommitted edits first.
 - After you move a child to another account or thread, restart it, or the cluster login expires, list every child
