@@ -14,6 +14,12 @@
         "hooks": [
           {"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_gate.py\"", "timeout": 5}
         ]
+      },
+      {
+        "matcher": "^mcp__t3-code__(t3_thread_\\w+|t3_background_wait|task_status|task_cancel)$",
+        "hooks": [
+          {"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/t3_args.py\"", "timeout": 5}
+        ]
       }
     ]
   }

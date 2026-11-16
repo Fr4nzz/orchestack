@@ -198,7 +198,7 @@ def test_merge_keeps_existing_and_is_idempotent(tmp_path):
     d = json.loads(s.read_text())
     assert d["model"] == "x"
     pre = d["hooks"]["PreToolUse"]
-    assert pre[0] == other and len(pre) == 2
+    assert pre[0] == other and len(pre) == 3
     assert str(REPO / "hooks" / "memory_gate.py") in pre[1]["hooks"][0]["command"]
     assert pre[1]["matcher"] == "^(Agent|Task|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch)$"
     assert d["hooks"]["SessionStart"][0]["matcher"] == "startup|resume|compact"
@@ -368,3 +368,53 @@ def test_gate_names_a_process_by_its_command_not_its_thread_name():
     finally:
         child.kill()
         child.wait()
+
+
+# --- hooks/t3_args.py ---
+
+T3_ARGS = REPO / "hooks" / "t3_args.py"
+
+
+def t3_args(tmp_path, tool, ti, rows=None):
+    env = {}
+    if rows is not None:
+        db = tmp_path / "userdata" / "statev2.sqlite"
+        if not db.exists():
+            db.parent.mkdir(exist_ok=True)
+            make_db(db, [(r, "t") for r in rows])
+        env["T3CODE_HOME"] = str(tmp_path)
+    p, _ = run(T3_ARGS, json.dumps({"tool_name": tool, "tool_input": ti}), env)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"] if p.stdout.strip() else None
+
+
+def test_t3_args_steer_becomes_auto(tmp_path):
+    out = t3_args(tmp_path, "mcp__t3-code__t3_thread_send", {"threadId": "x", "message": "m", "mode": "steer"})
+    assert out == {"threadId": "x", "message": "m", "mode": "auto"}
+    assert t3_args(tmp_path, "mcp__t3-code__t3_thread_send", {"threadId": "x", "message": "m", "mode": "queue"}) is None
+
+
+def test_t3_args_background_wait_task_id_and_label(tmp_path):
+    out = t3_args(tmp_path, "mcp__t3-code__t3_background_wait", {"taskId": "bdq", "waiting": "photo downloads"})
+    assert out == {"taskIds": ["bdq"], "waiting": True}
+    assert t3_args(tmp_path, "mcp__t3-code__t3_background_wait", {"taskIds": ["a"], "waiting": "false"}) == \
+        {"taskIds": ["a"], "waiting": False}
+    assert t3_args(tmp_path, "mcp__t3-code__t3_background_wait", {"taskIds": ["a"]}) is None
+
+
+def test_t3_args_resolves_bare_and_short_thread_ids(tmp_path):
+    uuid = "-".join(["a9b7662e", "1111", "4222", "8333", "444455556666"])  # built, so no literal id is committed
+    rows = [f"mcp:{uuid}", "mcp:launch:ec169874aaaa", "plain-thread", "dup12345-a", "dup12345-b"]
+    tool = "mcp__t3-code__t3_thread_read"
+    assert t3_args(tmp_path, tool, {"threadId": uuid}, rows) == {"threadId": f"mcp:{uuid}"}
+    assert t3_args(tmp_path, tool, {"threadId": "ec169874"}, rows) == {"threadId": "mcp:launch:ec169874aaaa"}
+    assert t3_args(tmp_path, tool, {"threadId": "dup12345"}, rows) is None  # two matches: left to T3's error
+    assert t3_args(tmp_path, tool, {"threadId": "plain-thread"}, rows) is None  # exists as written
+    assert t3_args(tmp_path, tool, {"threadId": "ec169874", "environmentId": "e"}, rows) is None
+    assert t3_args(tmp_path, tool, {"threadId": "ec169874"}) is None  # no database: unchanged
+
+
+def test_t3_args_ignores_other_tools_and_bad_input(tmp_path):
+    assert t3_args(tmp_path, "Bash", {"command": "ls"}) is None
+    p, _ = run(T3_ARGS, "not json", {})
+    assert p.returncode == 0 and p.stdout == ""
