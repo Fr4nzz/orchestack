@@ -106,7 +106,8 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
     After an outage, a move to another account or thread, a restart or an expired cluster login, follow **Recovery**
     in `references/operations.md`. Every child waiting on an external job needs a live wake again.
 15. **Confirm what is installed, deployed or running before stating it.** Check a child's result against its
-    done-check before reporting it done. Before handing the user a link or file, open it the way they will.
+    done-check before reporting it done. A child's own test of its own work is not that check: run the check
+    yourself or give it to another child. Before handing the user a link or file, open it the way they will.
 16. **Deploy finished, tested work by default** where the project allows it, with a rollback path. Push only your own
     commits. Keep untracked files over about 50 MB out of repos the harness checkpoints. Before a deploy, a shared
     GPU, a long run or a push, read `references/operations.md`.
@@ -114,7 +115,7 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 ## Briefs
 
 17. **Keep briefs short.** Quote the user's words for the goal, list the explicit asks as a done-check the child runs
-    before reporting done, and mark assumptions. Say where results go and check the child can write there. Copy the
+    before reporting done (a command or script where possible, so it cannot be argued away), and mark assumptions. Say where results go and check the child can write there. Copy the
     blocks below word for word (fill in <orchestack>, the repo path) and check them before dispatch, because a
     reworded line costs parent wakes. Every brief gets the safety and report block. Add the wait block too, unless you
     know the task runs nothing that waits over 2 min (the Bash tool's default timeout) *(default)*. When unsure, add
@@ -153,7 +154,9 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 ## Models and review
 
 18. **Use the pinned default model at a chosen effort:** medium for routine steps, high for hard ones, never low for
-    Claude models, never max by default. Only the user changes pinned models (suggest, never switch). A mid-tier
+    Claude models, never max by default. Only the user changes pinned models (suggest, never switch). `local.md` may pin one
+    model for coordinating chats (orchestrators, leads) and another for workers and critics. A coordinator plans,
+    decides and checks, and delegates reading, implementation and long tool work to workers on their model. A mid-tier
     model at medium effort suits well-specified work, a small one only read-only scouting, script-verified results
     or a calibrated image first pass (`bulk-image-review`), never final judgement.
 19. **Hill-climb important work with `sol-loop`:** code, writing, analyses and UI before they ship, always two
