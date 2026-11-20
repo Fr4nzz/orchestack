@@ -153,8 +153,8 @@ Before `watch.py add` or a background wait, read `references/waits.md`.
 
 ## Models and review
 
-18. **Use the pinned default model at a chosen effort:** medium for routine steps, high for hard ones, never low for
-    Claude models, never max by default. Only the user changes pinned models (suggest, never switch). `local.md` may pin one
+18. **Use the pinned default model at a chosen effort:** medium for routine steps, high for hard ones, never max by
+    default, and low only for a model `local.md` pins at low (some models lose too much at low, others do not). Only the user changes pinned models (suggest, never switch). `local.md` may pin one
     model for coordinating chats (orchestrators, leads) and another for workers and critics. A coordinator plans,
     decides and checks, and delegates reading, implementation and long tool work to workers on their model. A mid-tier
     model at medium effort suits well-specified work, a small one only read-only scouting, script-verified results
