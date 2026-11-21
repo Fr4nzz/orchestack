@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- `scripts/install.sh` and `scripts/check_drift.sh`: also link and check `~/.gemini/antigravity-cli/skills` when
+  `~/.gemini` exists (or `--antigravity` is passed), so Antigravity and T3 Code's `$` skill picker stay synced.
 - `orchestrator` wait block: a chat whose shell tool returns before a foreground command ends (Antigravity) skips
   the shell loop, registers scheduler jobs with `watch.py add --thread` at once and ends with `waiting:`.
 - `hooks/memory_gate.py`: reads memory twice more over `recheck_s` (default 3) before denying, keeps the whole hook

@@ -3,7 +3,7 @@
 #
 #   scripts/check_drift.sh
 #
-# For each repo skill in ~/.claude/skills and ~/.codex/skills it prints one of:
+# For each repo skill in ~/.claude/skills, ~/.codex/skills and (when ~/.gemini exists) ~/.gemini/antigravity-cli/skills it prints one of:
 #   ok        symlink into this repo
 #   MISSING   not installed
 #   ELSEWHERE symlink to another path (same or different content)
@@ -15,6 +15,7 @@ set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ROOTS=("$HOME/.claude/skills" "$HOME/.codex/skills")
+[[ -d $HOME/.gemini ]] && ROOTS+=("$HOME/.gemini/antigravity-cli/skills")
 IFS=, read -r -a SUPERSEDED <<< "${ORCHESTACK_RETIRED:-}"
 bad=0
 

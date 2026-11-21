@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# install.sh: install orchestack for Claude Code and Codex from this checkout.
+# install.sh: install orchestack for Claude Code, Codex and Antigravity from this checkout.
 #
-#   scripts/install.sh [--dry-run] [--uninstall] [--retire=NAME[,NAME...]] [--watcher] [--retro]
+#   scripts/install.sh [--dry-run] [--uninstall] [--retire=NAME[,NAME...]] [--watcher] [--retro] [--antigravity]
 #
-# 1. Symlinks each skills/<name> into ~/.claude/skills and ~/.codex/skills. An existing folder or foreign symlink
+# 1. Symlinks each skills/<name> into ~/.claude/skills and ~/.codex/skills, plus ~/.gemini/antigravity-cli/skills
+#    when ~/.gemini exists or --antigravity is passed. An existing folder or foreign symlink
 #    of the same name is moved (never deleted) to ~/.local/share/orchestack/backups/<ts>/<root>/<name>.bak-<ts>.
 #    Backups go outside the skill folders because agents load every SKILL.md they find there, backups included.
 # 2. --retire=NAME,... also moves your own older skills of those names to the same backup folder (off by default).
@@ -19,7 +20,7 @@ set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TS=$(date +%Y%m%d-%H%M%S)
-DRY=0 UNINSTALL=0 WATCHER=0 RETRO=0
+DRY=0 UNINSTALL=0 WATCHER=0 RETRO=0 ANTIGRAVITY=0
 SUPERSEDED=()
 for a in "$@"; do
   case $a in
@@ -27,13 +28,17 @@ for a in "$@"; do
     --uninstall) UNINSTALL=1 ;;
     --watcher) WATCHER=1 ;;
     --retro) RETRO=1 ;;
+    --antigravity) ANTIGRAVITY=1 ;;
     --retire=*) IFS=, read -r -a SUPERSEDED <<< "${a#--retire=}" ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
 
 ROOTS=("$HOME/.claude/skills" "$HOME/.codex/skills")
+if (( ANTIGRAVITY )) || [[ -d $HOME/.gemini ]]; then
+  ROOTS+=("$HOME/.gemini/antigravity-cli/skills")
+fi
 BACKUP_BASE="$HOME/.local/share/orchestack/backups"
 BACKUP="$BACKUP_BASE/$TS"
 SETTINGS="$HOME/.claude/settings.json"
