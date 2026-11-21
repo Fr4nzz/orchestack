@@ -55,9 +55,9 @@ In T3, call `orchestrator_capabilities`, then `delegate_task` once per critic in
 (medium by default). Save both task ids. `childThreadId` is storage, not the next target. Do not use
 `t3_thread_send`, `create_threads` or `t3_thread_launch` for review.
 
-Outside T3, use native subagents that actually run each model. If no route runs Sol (or Claude), the round cannot
-pass. Report it as waiting for that critic and rerun it when back. Never substitute another model or pass a round
-on one review.
+Outside T3, use native subagents for each model. Never pass on one review or swap silently. When a critic's quota
+is spent, never queue or schedule reviews for its reset: use the fallback critic in `local.md`, name the models
+used and close. Wait only when asked.
 
 Do not edit the work under review while they run. A top-level chat ends the turn and follows each completion
 notice. A child starts each critic with `delegate_task` mode "wait" (timeoutMs about the critic's expected time).

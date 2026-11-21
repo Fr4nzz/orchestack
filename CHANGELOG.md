@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- `skills/sol-loop`: when a critic's quota is spent, do not queue or schedule reviews for its reset (avoid draining the
+  fresh quota on reset). Use the fallback other-vendor critic in `local.md`, record the models used and close.
 - `scripts/install.sh` and `scripts/check_drift.sh`: also link and check `~/.gemini/antigravity-cli/skills` when
   `~/.gemini` exists (or `--antigravity` is passed), so Antigravity and T3 Code's `$` skill picker stay synced.
 - `orchestrator` wait block: a chat whose shell tool returns before a foreground command ends (Antigravity) skips
