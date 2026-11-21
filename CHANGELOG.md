@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- `orchestrator` wait block: a chat whose shell tool returns before a foreground command ends (Antigravity) skips
+  the shell loop, registers scheduler jobs with `watch.py add --thread` at once and ends with `waiting:`.
 - `hooks/memory_gate.py`: reads memory twice more over `recheck_s` (default 3) before denying, keeps the whole hook
   to a 3.5 s deadline, and names the largest processes by their command (`node 1.6 GiB (pid 1234)`).
 - `retro/scan.py` and `skills/retro`: a weekly retro of the tool errors agents worked around. The scan (stdlib, no
