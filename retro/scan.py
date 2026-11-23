@@ -2,10 +2,11 @@
 """retro/scan.py: weekly digest of the tool errors agents worked around. Read-only, no model calls, stdlib only.
 
     retro/scan.py [--days 7] [--out DIR] [--date YYYY-MM-DD] [--config FILE] [--claude-root DIR ...]
-                  [--codex-root DIR ...] [--now EPOCH]
+                  [--codex-root DIR ...] [--antigravity-root DIR ...] [--now EPOCH]
 
-Reads Claude Code transcripts (every ~/.claude*/projects by default, `api-request*` lines skipped) and Codex
-sessions (~/.codex/sessions) changed in the last N days, and keeps the tool results inside the window that
+Reads Claude Code transcripts (every ~/.claude*/projects by default, `api-request*` lines skipped), Codex
+sessions (~/.codex/sessions) and Antigravity transcripts (~/.t3*/userdata/providers/antigravity/*/antigravity-acp/brain
+and ~/.gemini/antigravity*/brain) changed in the last N days, and keeps the tool results inside the window that
 failed. Each error gets a category, a tool (for MCP: server and tool) and an owner:
 
 - an owner from config.json `retro.owners` whose `cwd` regex matches the transcript's working directory
@@ -26,6 +27,8 @@ whole transcripts. Prints only the digest path and totals, so the journal holds 
 
 Config (`$ORCHESTACK_CONFIG_DIR/config.json`, default ~/.config/orchestack), all keys optional:
     "retro": {"claude_roots": ["~/.claude/projects", "~/.claude-*/projects"], "codex_roots": ["~/.codex/sessions"],
+              "antigravity_roots": ["~/.t3*/userdata/providers/antigravity/*/antigravity-acp/brain",
+                                    "~/.gemini/antigravity*/brain"],
               "out_dir": "~/.local/state/orchestack/retro", "days": 7,
               "pc_tools": ["^mcp__t3-code__"],
               "owners": [{"name": "app assistant", "cwd": ["/\\.myapp-lab/workspaces"], "own_permissions": true}]}
@@ -60,9 +63,9 @@ CATS = [
     ("command not found", r"command not found|not found in path|no such command|is not recognized as|exit code 127\b"),
     ("python module missing", r"modulenotfounderror|no module named|cannot find module"),
     ("wrong interpreter or venv", r"externally-managed-environment|bad interpreter|no such file or directory: '?[^\s']*(venv|python)|virtualenv"),
-    ("Edit string not found or ambiguous", r"string to replace not found|found \d+ matches of the string"),
+    ("Edit string not found or ambiguous", r"string to replace not found|found \d+ matches of the string|target content not found"),
     ("file not read first or changed since read", r"has not been read yet|modified since (it was )?read|read it first"),
-    ("tool input or schema error", r"inputvalidationerror|invalid (tool )?parameters|no such tool|unknown tool|required parameter|input schema|missing key at"),
+    ("tool input or schema error", r"inputvalidationerror|invalid (tool )?parameters|invalid arguments:|no such tool|unknown tool|required parameter|input schema|missing key at"),
     ("MCP server not connected or signed out", r"mcp server [^\n]* (is not connected|needs you to sign in)"),
     ("file or path missing", r"no such file or directory|does not exist|enoent|file not found|cannot access|path not found|: not found"),
     ("OS permission denied", r"permission denied|eacces"),
@@ -504,6 +507,160 @@ class Scan:
         if active:
             self.sessions.add(("codex", session))
 
+    def antigravity_file(self, path, workspaces=None):
+        """Read one Antigravity transcript.jsonl. Tool calls live on PLANNER_RESPONSE steps and their results on
+        following GENERIC / VIEW_FILE / MCP_TOOL / RUN_COMMAND / ERROR_MESSAGE steps in order. Backgrounded
+        run_command calls finish later in a SYSTEM_MESSAGE."""
+        parts = os.path.normpath(path).split(os.sep)
+        session = parts[-4] if len(parts) >= 4 and parts[-2] == "logs" and parts[-3] == ".system_generated" else (
+            os.path.splitext(os.path.basename(path))[0])
+        cwd = (workspaces or {}).get(session, "")
+        pending = []
+        bg_cmds = {}
+        active = False
+        with open(path, errors="replace") as fh:
+            for lineno, line in enumerate(fh, 1):
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                t = d.get("type")
+                ts = d.get("created_at") or ""
+                in_win = not ts or ts[:19] >= self.cut_iso
+                if t == "PLANNER_RESPONSE":
+                    pending = []
+                    for tc in d.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        name, cmd = agy_tool(tc)
+                        pending.append((name, cmd))
+                        if in_win:
+                            self.calls[self.owners.of(cwd)] += 1
+                            active = True
+                    continue
+                if t == "SYSTEM_MESSAGE":
+                    content = str(d.get("content") or "")
+                    m = AGY_BG_DONE.search(content)
+                    if m:
+                        cmd = bg_cmds.pop(m.group(1), None)
+                        e = agy_exit_error(m.group(2))
+                        if e and in_win:
+                            self.add_error(account="antigravity", session=session, path=path, lineno=lineno, cwd=cwd,
+                                           tool="run_command", text=e, cmd=cmd)
+                    continue
+                if t in ("USER_INPUT", "CHECKPOINT"):
+                    continue
+                if t == "ERROR_MESSAGE" and d.get("source") == "SYSTEM":
+                    continue
+                name, cmd = pending.pop(0) if pending else ("?", None)
+                content = str(d.get("content") or "")
+                status = d.get("status")
+                if status == "RUNNING" and name == "run_command":
+                    m = AGY_BG_START.search(content)
+                    if m:
+                        bg_cmds[m.group(1)] = cmd
+                    continue
+                if not in_win:
+                    continue
+                err = str(d.get("error") or "").strip()
+                if status in ("ERROR", "INVALID") or err:
+                    self.add_error(account="antigravity", session=session, path=path, lineno=lineno, cwd=cwd,
+                                   tool=name, text=err or agy_strip_meta(content), cmd=cmd)
+                    continue
+                e = agy_exit_error(content) if (name == "run_command" or "Command exited with code" in content[:800]) else None
+                if e:
+                    self.add_error(account="antigravity", session=session, path=path, lineno=lineno, cwd=cwd,
+                                   tool=name, text=e, cmd=cmd)
+                    continue
+                if name.startswith("mcp__"):
+                    v = decoded(agy_strip_meta(content))
+                    if isinstance(v, dict) and (v.get("isError") is True
+                                                or v.get("_tag") in ("Failure", "OrchestratorMcpFailure")
+                                                or v.get("error")):
+                        self.add_error(account="antigravity", session=session, path=path, lineno=lineno, cwd=cwd,
+                                       tool=name, text=mcp_text(v), cmd=cmd)
+        if active:
+            self.sessions.add(("antigravity", session))
+
+
+AGY_META = re.compile(r"\A(?:(?:Created At|Completed At):\s*[^\n]*\n)+")
+AGY_EXIT = re.compile(r"(?m)^Command exited with code (\d+)\.?\s*$")
+AGY_BG_START = re.compile(r"background task with task id:\s*(\S+)")
+AGY_BG_DONE = re.compile(r'Task id "([^"]+)" finished with result:\s*(.*)', re.S)
+
+
+def agy_unquote(val):
+    if not isinstance(val, str):
+        return None
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        try:
+            u = json.loads(val)
+            return u if isinstance(u, str) else val
+        except ValueError:
+            return val
+    return val
+
+
+def agy_tool(tc):
+    """(normalised tool name, shell command or None) for an Antigravity tool_call dict."""
+    name = tc.get("name") or "?"
+    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+    if name == "call_mcp_tool":
+        srv = agy_unquote(args.get("ServerName")) or "?"
+        tool = agy_unquote(args.get("ToolName")) or "?"
+        return f"mcp__{srv}__{tool}", None
+    if name.startswith("mcp_") and not name.startswith("mcp__"):
+        m = re.match(r"^mcp_([^_]+)_(.+)$", name)
+        if m:
+            name = f"mcp__{m.group(1)}__{m.group(2)}"
+    cmd = agy_unquote(args.get("CommandLine")) if name == "run_command" else None
+    return name, cmd
+
+
+def agy_strip_meta(text):
+    return AGY_META.sub("", text or "").strip()
+
+
+def agy_exit_error(text):
+    """'Exit code N\\n<output>' when an Antigravity command exited non-zero, '' for 0, None if no exit line."""
+    m = AGY_EXIT.search((text or "")[:800])
+    if not m:
+        return None
+    if m.group(1) == "0":
+        return ""
+    rest = (text or "")[m.end():]
+    out = rest.split("Command output:\n", 1)[1] if "Command output:\n" in rest[:300] else rest.lstrip("\r\n")
+    return f"Exit code {m.group(1)}\n{out}"
+
+
+def antigravity_workspaces(root):
+    """{conversation_id: workspace path} from conversation_summaries.db next to <brain>, if present. Read-only."""
+    db = os.path.join(os.path.dirname(root.rstrip("/")), "conversation_summaries.db")
+    if not os.path.isfile(db):
+        return {}
+    import sqlite3
+    from urllib.parse import quote, unquote, urlparse
+    out = {}
+    try:
+        con = sqlite3.connect(f"file:{quote(db)}?mode=ro", uri=True, timeout=2)
+        try:
+            for cid, uris in con.execute("SELECT conversation_id, workspace_uris FROM conversation_summaries"):
+                try:
+                    arr = json.loads(uris or "[]")
+                except ValueError:
+                    continue
+                if not isinstance(arr, list) or not arr:
+                    continue
+                chosen = next((u for u in arr if isinstance(u, str) and "/userdata/attachments" not in u), arr[0])
+                if isinstance(chosen, str):
+                    p = urlparse(chosen)
+                    out[str(cid)] = unquote(p.path) if p.scheme == "file" else chosen
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    return out
+
 
 def text_of(c):
     if isinstance(c, str):
@@ -793,10 +950,10 @@ def expand(patterns):
     return out
 
 
-def files(root, cutoff):
+def files(root, cutoff, exact=None):
     for dp, _, fn in os.walk(root):
         for f in fn:
-            if f.endswith(".jsonl"):
+            if (f == exact) if exact else f.endswith(".jsonl"):
                 p = os.path.join(dp, f)
                 try:
                     if os.path.getmtime(p) >= cutoff:
@@ -813,6 +970,7 @@ def main(argv=None):
     ap.add_argument("--config")
     ap.add_argument("--claude-root", action="append")
     ap.add_argument("--codex-root", action="append")
+    ap.add_argument("--antigravity-root", action="append")
     ap.add_argument("--now", type=float, help="epoch seconds (tests)")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
@@ -823,6 +981,10 @@ def main(argv=None):
     out_dir = os.path.expanduser(a.out or cfg.get("out_dir") or "~/.local/state/orchestack/retro")
     claude = expand(a.claude_root or cfg.get("claude_roots") or ["~/.claude/projects", "~/.claude-*/projects"])
     codex = expand(a.codex_root or cfg.get("codex_roots") or ["~/.codex/sessions"])
+    antigravity = expand(a.antigravity_root or cfg.get("antigravity_roots") or [
+        "~/.t3*/userdata/providers/antigravity/*/antigravity-acp/brain",
+        "~/.gemini/antigravity*/brain",
+    ])
     scan = Scan(Owners(cfg.get("owners"), cfg.get("pc_tools")), cutoff)
     t0 = time.time()
     for root in claude:
@@ -834,9 +996,14 @@ def main(argv=None):
         for p in files(root, cutoff):
             scan.files += 1
             scan.codex_file(p)
+    for root in antigravity:
+        ws = antigravity_workspaces(root)
+        for p in files(root, cutoff, exact="transcript.jsonl"):
+            scan.files += 1
+            scan.antigravity_file(p, ws)
     os.makedirs(out_dir, mode=0o700, exist_ok=True)
     prev = previous(out_dir, date, days)
-    md = render(scan, date, days, prev, claude + codex)
+    md = render(scan, date, days, prev, claude + codex + antigravity)
     summary = {"date": date, "days": days, "calls": sum(scan.calls.values()), "errors": sum(scan.errors.values()),
                "owners": dict(scan.errors), "fine": dict(scan.fine),
                "clusters": {"\t".join(k): c["count"] for k, c in scan.clusters.items()}}

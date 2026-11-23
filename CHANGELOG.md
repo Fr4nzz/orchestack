@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+- `retro/scan.py`: also scan Antigravity transcripts (`~/.t3*/userdata/providers/antigravity/*/antigravity-acp/brain`
+  and `~/.gemini/antigravity*/brain`, `transcript.jsonl` only), resolving workspaces from `conversation_summaries.db`,
+  normalising `mcp_<server>_<tool>` and `call_mcp_tool` names, and catching non-zero backgrounded `run_command` exits.
 - `watcher/watch.py`: `watch.py lead --thread <id> --remove` now writes a closed marker in `leads/removed/` so the
   `Lead:` title fallback does not re-adopt a finished lead (and drops any held outbox wake for it). Also tightened
   `ids_conflict` and `lead_report_sent` so T3 thread links, bare UUIDs, count adjectives, extra metrics on a shared

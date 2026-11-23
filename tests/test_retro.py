@@ -50,7 +50,8 @@ def run(tmp, *extra, config=None, date="2027-01-15", now=NOW):
     out = tmp / "out"
     p = subprocess.run([sys.executable, "-I", str(SCAN), "--config", str(cfg), "--out", str(out), "--date", date,
                         "--now", str(now), "--claude-root", str(tmp / ".claude-acct" / "projects"),
-                        "--codex-root", str(tmp / "codex"), *extra], capture_output=True, text=True, check=True)
+                        "--codex-root", str(tmp / "codex"), "--antigravity-root", str(tmp / "antigravity" / "brain"),
+                        *extra], capture_output=True, text=True, check=True)
     md = (out / f"{date}.md").read_text()
     js = json.loads((out / f"{date}.json").read_text())
     return p, md, js
@@ -430,6 +431,69 @@ def test_codex_exec_results_mcp_errors_and_batches(tmp_path):
     assert js["fine"] == {"exit 1 with no output from grep, rg, diff, cmp, test or pgrep": 2}
     assert js["calls"] == 13                        # a wait is no new tool call
     assert "No rule to make target" in md and "`OK`" not in md
+
+
+def test_antigravity_transcripts(tmp_path):
+    import sqlite3
+    repo = tmp_path / "src" / "webshop"
+    (repo / ".git").mkdir(parents=True)
+    agy = tmp_path / "antigravity"
+    agy.mkdir()
+    con = sqlite3.connect(agy / "conversation_summaries.db")
+    con.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, workspace_uris TEXT)")
+    con.execute("INSERT INTO conversation_summaries VALUES (?, ?)",
+                ("conv-1", json.dumps([f"file://{repo}", "file:///tmp/userdata/attachments"])))
+    con.commit()
+    con.close()
+    logs = agy / "brain" / "conv-1" / ".system_generated" / "logs"
+    logs.mkdir(parents=True)
+    steps = [
+        {"type": "USER_INPUT", "status": "DONE", "created_at": TS, "content": "hi"},
+        {"type": "PLANNER_RESPONSE", "status": "DONE", "created_at": TS, "tool_calls": [
+            {"name": "run_command", "args": {"CommandLine": json.dumps("grep -q needle missing.txt")}},
+            {"name": "run_command", "args": {"CommandLine": json.dumps("python3 -c 'import nope'")}},
+            {"name": "edit_file", "args": {"Path": json.dumps(str(repo / "a.py"))}},
+            {"name": "mcp_shared_send", "args": {"threadId": json.dumps("t1")}},
+            {"name": "call_mcp_tool", "args": {"ServerName": json.dumps("db"), "ToolName": json.dumps("query")}},
+            {"name": "run_command", "args": {"CommandLine": json.dumps("pytest -q")}},
+        ]},
+        {"type": "GENERIC", "status": "DONE", "created_at": TS,
+         "content": "Created At: 2027-01-14\nCommand exited with code 1.\n\nCommand output:\n"},
+        {"type": "GENERIC", "status": "DONE", "created_at": TS,
+         "content": "Created At: 2027-01-14\nCommand exited with code 1.\n\nCommand output:\nTraceback (most recent call last):\nModuleNotFoundError: No module named 'nope'\n"},
+        {"type": "GENERIC", "status": "ERROR", "created_at": TS,
+         "error": "target content not found in the file", "content": "Encountered error"},
+        {"type": "GENERIC", "status": "ERROR", "created_at": TS,
+         "error": '{"_tag":"OrchestratorMcpFailure","code":"thread_not_found","message":"gone"}', "content": ""},
+        {"type": "GENERIC", "status": "DONE", "created_at": TS,
+         "content": 'Created At: 2027-01-14\n{"isError":true,"error":"SQLite: no such column: Date"}'},
+        {"type": "GENERIC", "status": "RUNNING", "created_at": TS,
+         "content": "Tool is running as a background task with task id: conv-1/task-9\n"},
+        # System stream interruption must not count as a tool error.
+        {"type": "ERROR_MESSAGE", "source": "SYSTEM", "status": "DONE", "created_at": TS,
+         "error": "The stream was interrupted.", "content": "Error: The stream was interrupted."},
+        # Background task finishes non-zero later in a SYSTEM_MESSAGE.
+        {"type": "SYSTEM_MESSAGE", "source": "SYSTEM", "status": "DONE", "created_at": TS,
+         "content": 'Task id "conv-1/task-9" finished with result:\nCommand exited with code 1.\n\nCommand output:\nFAILED test_x.py::test_a - AssertionError\n'},
+    ]
+    tfile = logs / "transcript.jsonl"
+    tfile.write_text("".join(json.dumps(s) + "\n" for s in steps))
+    os.utime(tfile, (NOW, NOW))
+    # transcript_full.jsonl sits next to transcript.jsonl and must be ignored (no double counting).
+    full = logs / "transcript_full.jsonl"
+    full.write_text(tfile.read_text())
+    os.utime(full, (NOW, NOW))
+    _, md, js = run(tmp_path, config=APP)
+    assert js["calls"] == 6
+    assert js["clusters"] == {
+        "this PC\tpython module missing\trun_command": 1,
+        "this PC\tMCP thread_not_found\tmcp shared/send": 1,
+        "project webshop\tEdit string not found or ambiguous\tedit_file": 1,
+        "project webshop\tno such column\tmcp db/query": 1,
+        "project webshop\ttest or check failed\trun_command": 1,
+    }
+    assert js["fine"] == {"exit 1 with no output from grep, rg, diff, cmp, test or pgrep": 1}
+    assert "antigravity `conv-1`" in md
 
 
 def test_categorize_uses_error_lines_after_a_long_listing():
