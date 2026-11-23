@@ -128,7 +128,9 @@ T3 records no lineage for a launched lead.
    `$T3CODE_THREAD_ID`, or `--parent`).
 2. That writes `~/.local/state/orchestack/leads/<id>.json`, and the `children` and `decision` checks then treat
    the lead as that parent's child.
-3. When the lane is done, the parent runs `watch.py lead --thread <lead id> --remove`.
+3. When the lane is done, the parent runs `watch.py lead --thread <lead id> --remove`. That deletes the lead file,
+   records a closed marker in `leads/removed/` so the `Lead:` title fallback does not re-adopt it, and drops any
+   held outbox wake for it. Re-registering the thread clears the marker.
 
 ### Job states from the cluster
 

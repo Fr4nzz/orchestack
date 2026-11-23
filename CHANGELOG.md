@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `watcher/watch.py`: `watch.py lead --thread <id> --remove` now writes a closed marker in `leads/removed/` so the
+  `Lead:` title fallback does not re-adopt a finished lead (and drops any held outbox wake for it). Also tightened
+  `ids_conflict` and `lead_report_sent` so T3 thread links, bare UUIDs, count adjectives, extra metrics on a shared
+  deliverable, and turn-end echoes of a `work continues` send no longer fire false "did not relay" wakes.
 - `skills/orchestrator`: clarify in the wait block that `t3_background_wait` must be called in the next message with
   the ID returned by the background Bash call, never in the same tool-call block.
 - `skills/sol-loop`: when a critic's quota is spent, do not queue or schedule reviews for its reset (avoid draining the

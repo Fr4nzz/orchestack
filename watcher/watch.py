@@ -91,6 +91,8 @@ WAITING_RE = re.compile(r"^\s*[*_>]*\s*waiting[*_]*\s*:[*_]*\s*((?:\d{4,10}(?:\[
                         re.I)
 WAIT_ID_RE = re.compile(r"\d{4,10}(?:\[[^\]\n]*\])?")  # one job id in a waiting: list, array index part included
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+T3_LINK_RE = re.compile(r"t3-thread://[^\s)>\]]+", re.I)
+VERSION_RE = re.compile(r"\bv\d+(?:\.\d+)*\b")
 KEEP_DAYS = 14
 OUTBOX_MAX_HOURS = 24
 PACE_FULL = 98.0  # use an account up to about this much before its reset: the rest is lost
@@ -357,10 +359,15 @@ class Ctx:
         return row[0], row[1] or self.launched_parent(thread_id, row[0])
 
     def launched_parent(self, thread_id, title=None):
-        """The parent of a thread T3 never relays: its lead file's, else, for a thread titled "Lead:", the top of its
-        launch chain (see `launch_chain`)."""
+        """The parent of a thread T3 never relays: its lead file's, else (unless closed with `watch.py lead
+        --remove`) for a thread titled "Lead:", the top of its launch chain (see `launch_chain`)."""
+        parent = lead_parent(thread_id)
+        if parent:
+            return parent
+        if lead_removed(thread_id):
+            return None
         chain = self.launch_chain(thread_id, title)
-        return lead_parent(thread_id) or (chain[-1] if chain else None)
+        return chain[-1] if chain else None
 
     def launch_chain(self, thread_id, title=None):
         """Who launched a thread titled "Lead:", then who launched that one while it is an unregistered lead too,
@@ -398,6 +405,19 @@ def leads_dir():
 
 def lead_file(thread_id):
     return leads_dir() / (re.sub(r"[^A-Za-z0-9_.-]", "_", str(thread_id)).strip(".") + ".json")
+
+
+def removed_lead_file(thread_id):
+    return leads_dir() / "removed" / (re.sub(r"[^A-Za-z0-9_.-]", "_", str(thread_id)).strip(".") + ".json")
+
+
+def lead_removed(thread_id):
+    """This lead was closed with `watch.py lead --remove`, so `Q_LAUNCHER` does not rediscover it."""
+    try:
+        data = json.loads(removed_lead_file(thread_id).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return data.get("thread") == str(thread_id)
 
 
 def lead_parent(thread_id):
@@ -1019,12 +1039,15 @@ def child_decision_relayed(db, parent, child, created, since=None):
 
 def report_parts(text):
     """(words, identifiers) of a report's first 200 characters. Identifiers are versions, job ids and file paths:
-    tokens with a digit, a slash or a file extension, but not bare numbers ("30 px")."""
+    tokens with a digit, a slash or a file extension, excluding T3 thread links, bare UUIDs, bare numbers ("30 px")
+    and hyphenated count words ("5-line")."""
     t = (text or "")[:200].lower()
     if len(text or "") > 200:
         t = t.rsplit(None, 1)[0]  # the last token may be cut off
+    t = UUID_RE.sub("", T3_LINK_RE.sub("", t))
     ids = {i.rstrip(".,;:)") for i in re.findall(r"[\w./-]+", t)
-           if re.search(r"\d|/|\.[a-z]{2,5}$", i.rstrip(".,;:)")) and not re.fullmatch(r"[\d.,]+", i.rstrip(".,;:)"))}
+           if re.search(r"\d|/|\.[a-z]{2,5}$", i.rstrip(".,;:)"))
+           and not re.fullmatch(r"[\d.,]+|\d+-[a-z]+", i.rstrip(".,;:)"))}
     return set(re.findall(r"[a-z0-9]{3,}", t)) - REPORT_WORDS, ids
 
 
@@ -1044,12 +1067,17 @@ def same_report(sent, report):
 
 
 def ids_conflict(sent, report):
-    """Each side names an identifier (version, path, job id) the other lacks. Two identifiers agree when one
-    contains the other (a full path and its file name, or a path cut off at 200 characters)."""
+    """The two texts name conflicting deliverable identifiers: either both name version tags (`v9.2` vs `v9.3`)
+    and the send omits a version the report names, or both name identifiers and share none (one containing the other
+    counts as shared, for a full path and its file name or a path cut off at 200 characters)."""
+    va = set(VERSION_RE.findall(T3_LINK_RE.sub("", (sent or "")[:200].lower())))
+    vb = set(VERSION_RE.findall(T3_LINK_RE.sub("", (report or "")[:200].lower())))
+    if va and vb and not (vb <= va):
+        return True
     ia, ib = report_parts(sent)[1], report_parts(report)[1]
-    def lacks(xs, ys):
-        return any(not any(x in y or y in x for y in ys) for x in xs)
-    return lacks(ia, ib) and lacks(ib, ia)
+    if not ia or not ib:
+        return False
+    return not any(x in y or y in x for x in ia for y in ib)
 
 
 def lead_report_sent(db, recipients, lead, created, kind, text):
@@ -1058,7 +1086,7 @@ def lead_report_sent(db, recipients, lead, created, kind, text):
     - has the same word, falls between the lead's previous and next report (sent first and then a turn ended with
       a reworded copy, or sent after), and names no conflicting identifier (versions, paths), so an interim
       "done: draft at out/fig.html" never delivers "done: final v10"; or
-    - carries this report (`same_report`), at any later time (re-sent when asked).
+    - carries this report (`same_report`), in the same window or at any later time (re-sent when asked).
     A progress send, or a send of another report, does not deliver it. Q_SENT_BY keeps the 50 newest sends: a
     chatty lead can push the match out, which costs a spare wake, never a lost report."""
     starts = sorted(s for s in (started or requested for requested, started in db.execute(Q_LEAD_RUNS, (lead,)))
@@ -1083,7 +1111,7 @@ def lead_report_sent(db, recipients, lead, created, kind, text):
             if (lo <= at < hi and m.group(1).lower() == kind and "work continues" not in (sent or "").lower()
                     and not ids_conflict(sent, text)):
                 return True
-            if at >= created and same_report(sent, text):
+            if (at >= created or lo <= at < hi) and same_report(sent, text):
                 return True
     return False
 
@@ -1095,6 +1123,8 @@ def child_decision_open(db, item):
     if r.get("kind") == "nojob":  # the child's own no-job-file wake: due while that handoff is still its last word
         return bool(row) and row[0] == r["message"]
     if r.get("kind") == "lead":  # a launched lead's report stays due under later messages until it reaches the parent
+        if lead_removed(r["child"]):
+            return False
         return not lead_report_sent(db, r.get("recipients") or [r["parent"]], r["child"], r["created"],
                                     r.get("report") or "done", r.get("text") or "")
     return bool(row) and row[0] == r["message"] and not child_decision_relayed(db, r["parent"], r["child"],
@@ -1591,17 +1621,25 @@ def lead_main(argv):
         print(f"watch.py lead: invalid --thread {thread!r}", file=sys.stderr)
         return 2
     path = lead_file(thread)
+    removed = removed_lead_file(thread)
     if args.remove:
-        if path.exists():
+        existed = path.exists()
+        if existed:
             path.unlink()
-            print(f"watch.py lead: removed {path}")
-        else:
-            print(f"watch.py lead: no lead file for {thread}")
+        removed.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = removed.with_name(removed.name + ".tmp")
+        tmp.write_text(json.dumps({"thread": thread, "removed": iso(datetime.now(UTC))}, indent=1) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, removed)
+        print(f"watch.py lead: removed {path}" if existed
+              else f"watch.py lead: silenced {thread} (no lead file, watcher will ignore it)")
         return 0
     if not parent or not THREAD_ID_RE.match(parent) or parent == thread:
         print("watch.py lead: no valid --parent and no T3CODE_THREAD_ID in the environment (run it from the parent"
               " chat, or pass --parent)", file=sys.stderr)
         return 2
+    if removed.exists():
+        removed.unlink()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps({"thread": thread, "parent": parent}, indent=1) + "\n", encoding="utf-8")

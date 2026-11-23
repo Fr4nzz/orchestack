@@ -2219,6 +2219,71 @@ def test_relay_written_before_the_childs_final_message_still_counts(tmp_path):
     assert rig.wakes() == []
 
 
+def test_lead_remove_silences_title_fallback_and_drops_held_wakes(tmp_path):
+    rig, conn = unregistered_lead_rig(tmp_path)
+    assert lead_cli(rig, "--thread", "mcp:lead-7", env_thread="orch-1").returncode == 0
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(10))
+    add_message(conn, "a1", "mcp:lead-7", "assistant", "done: wave 1 finished", at(10))
+    assert lead_cli(rig, "--thread", "mcp:lead-7", "--remove").returncode == 0
+    assert not (rig.state_dir / "leads" / "mcp_lead-7.json").exists()
+    assert (rig.state_dir / "leads" / "removed" / "mcp_lead-7.json").exists()
+    rig.run(at(45))
+    assert rig.wakes() == []  # Q_LAUNCHER fallback does not re-adopt a removed lead
+    # Re-registering clears the removed marker.
+    assert lead_cli(rig, "--thread", "mcp:lead-7", env_thread="orch-1").returncode == 0
+    assert not (rig.state_dir / "leads" / "removed" / "mcp_lead-7.json").exists()
+    # A wake already held in the outbox is dropped if the lead is removed before delivery.
+    state = rig.state()
+    state["sent"] = {"orch-1": at(40)}
+    (rig.state_dir / "watch.json").write_text(json.dumps(state))
+    rig.run(at(45))
+    assert rig.wakes() == [] and len(rig.state()["outbox"]) == 1
+    assert lead_cli(rig, "--thread", "mcp:lead-7", "--remove").returncode == 0
+    p = rig.run(at(105), "--verbose")
+    assert rig.wakes() == [] and rig.state()["outbox"] == []
+    assert "answered or relayed meanwhile" in p.stdout
+
+
+def test_lead_sent_report_with_extra_metrics_or_parent_link_is_delivered(tmp_path):
+    # Case 1: turn-end copy cites the parent thread UUID while the send has URLs and ports.
+    (tmp_path / "uuid").mkdir()
+    rig, conn = unregistered_lead_rig(tmp_path / "uuid")
+    rig.run(at(2))
+    add_run(conn, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn, "s1", "done: Wave 1 live at http://host.example:8930/ (prod :9981 untouched).", at(18))
+    add_message(conn, "a1", "mcp:lead-7", "assistant",
+                f"done: Wave 1 complete and reported to parent ({fake_uuid(1)}).", at(20))
+    rig.run(at(60))
+    assert rig.wakes() == []
+    # Case 2: both share the main deliverable ids (v3, model_s2) while each mentions extra metrics/release tags.
+    (tmp_path / "shared").mkdir()
+    rig2, conn2 = unregistered_lead_rig(tmp_path / "shared")
+    rig2.run(at(2))
+    add_run(conn2, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn2, "s1",
+              "decision: model v3 Stage 4 is NO-GO, keep model_s2 (1.51x/3.17x, 300/300 checks).", at(18))
+    add_message(conn2, "p1", "orch-1", "assistant", "Noted.", at(19))
+    add_message(conn2, "a1", "mcp:lead-7", "assistant",
+                f"decision: model v3 Stage 4 is NO-GO, keep model_s2 (release 20261105T0433Z). "
+                f"Sent to [Parent](t3-thread://v2/{fake_uuid(2)}/{fake_uuid(3)}).", at(20))
+    rig2.run(at(60))
+    assert rig2.wakes() == []
+    # Case 3: lead sends a mid-lane "work continues" deliverable and echoes the exact same report at turn end.
+    (tmp_path / "echo").mkdir()
+    rig3, conn3 = unregistered_lead_rig(tmp_path / "echo")
+    rig3.run(at(2))
+    add_run(conn3, "mcp:lead-7", 2, "completed", at(5), at(20))
+    lead_send(conn3, "s1", "done: stage2 (`run-ab12`) is live at https://example.org/ (commit d97a12), work continues.",
+              at(18))
+    add_message(conn3, "a1", "mcp:lead-7", "assistant",
+                "done: stage2 (`run-ab12`) is live at https://example.org/ (commit d97a12).", at(20))
+    rig3.run(at(60))
+    assert rig3.wakes() == []
+    # Guard: a different version still conflicts even when other ids match.
+    assert WATCH_MOD.ids_conflict("done: report v9.3 at out/report.docx", "done: report v9.2 at out/report.docx")
+
+
 # ---------- pace ----------
 
 def pace_run(rig, now):
