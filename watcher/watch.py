@@ -484,6 +484,16 @@ def job_limits(f):
     return num("expect_min"), num("max_pend_h")
 
 
+def job_hold_dir(f):
+    """Optional hold_dir path from a job file, or ''."""
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        val = str(data.get("hold_dir") or "").strip()
+        return val if val and SAFE_PATH_RE.match(val) else ""
+    except Exception:
+        return ""
+
+
 def oldest_open_job_owner(ctx):
     """(owner, parent) of the oldest open job file (by modification time), or None."""
     found = []
@@ -611,6 +621,7 @@ def check_jobs(ctx):
         for j, got in lookup_jobs(ctx, sec, missing, norm).items():
             listed.setdefault(j, got)
     ctx.restart_budget()  # report_hint reads the database after the (slow) cluster calls
+    check_hold_beacons(ctx, groups, st, baseline)
     for f, key, thread, jobs, next_step, mtime, parent in groups:
         states = {}
         for j in jobs:
@@ -690,6 +701,108 @@ def check_jobs(ctx):
 
 JOB_ID_RE = re.compile(r"^\d+(\[\d+\])?$")
 SAFE_JOB_RE = re.compile(r"^[A-Za-z0-9_.:\[\]-]{1,64}$")
+SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]{1,512}$")
+
+
+def fetch_holds(ctx, sec, dirs):
+    """Read hpc-hold beacon.json files for `dirs` via jobs.hold_command (or local filesystem if unconfigured).
+    Output lines from hold_command: '<dir>\\t<json>' or '<json>' (with 'dir' field). -> {dir: beacon dict}."""
+    dirs = [d for d in dict.fromkeys(dirs) if SAFE_PATH_RE.match(d)]
+    if not dirs:
+        return {}
+    cmd = sec.get("hold_command")
+    if not cmd:
+        found = {}
+        for d in dirs:
+            p = Path(os.path.expanduser(d)) / "beacon.json"
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    found[d] = data
+            except Exception:
+                continue
+        return found
+    if isinstance(cmd, list):
+        argv = []
+        for a in cmd:
+            argv += dirs if a == "{dirs}" else [str(a).replace("{dirs}", " ".join(shlex.quote(d) for d in dirs))]
+        cmd = argv
+    else:
+        cmd = str(cmd).replace("{dirs}", " ".join(shlex.quote(d) for d in dirs))
+    rc, out, err = run_cmd(cmd, float(sec.get("hold_timeout_s", 60)))
+    if rc != 0 and not out.strip():
+        ctx.note(f"holds: command failed ({rc}): {short(err, 120)}")
+        return {}
+    found = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            d, raw = line.split("\t", 1)
+        else:
+            d, raw = "", line
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            key = d.strip() or str(data.get("dir") or "").strip()
+            if key:
+                found[key] = data
+    return found
+
+
+def check_hold_beacons(ctx, groups, st, baseline=False):
+    """Wake a job file's owner urgently when its hpc-hold beacon is in HOLD_ON_FAIL (once per job+attempt)."""
+    alerted = st.setdefault("hold_alerted", {})
+    live_keys = {g[1] for g in groups}
+    for k in [k for k in alerted if k.split("::", 1)[0] not in live_keys]:
+        del alerted[k]
+    hold_groups = []
+    for f, key, thread, jobs, next_step, mtime, parent in groups:
+        hdir = job_hold_dir(f)
+        if hdir:
+            hold_groups.append((f, key, thread, jobs, parent, hdir))
+    if not hold_groups:
+        return
+    beacons = fetch_holds(ctx, ctx.section("jobs"), [g[5] for g in hold_groups])
+    ctx.restart_budget()
+    for f, key, thread, jobs, parent, hdir in hold_groups:
+        b = beacons.get(hdir)
+        if not b or b.get("status") != "HOLD_ON_FAIL":
+            continue
+        jid = str(b.get("job_id") or ",".join(jobs[:3]))
+        attempt = b.get("attempt", 1)
+        hkey = f"{key}::{jid}:{attempt}"
+        if hkey in alerted:
+            continue
+        hold_until = b.get("hold_until")
+        left_min = None
+        if hold_until:
+            try:
+                left_min = (parse_iso(hold_until) - ctx.now).total_seconds() / 60
+                if left_min <= 0:
+                    continue  # window already closed
+            except ValueError:
+                left_min = None
+        if baseline:
+            alerted[hkey] = iso(ctx.now)
+            continue
+        owner_thread, _ = resolve_owner(ctx, thread, parent)
+        left_s = f" (~{left_min:.1f} min left, until {hold_until})" if left_min is not None else ""
+        tail = short(b.get("tail") or "", 180)
+        tail_s = f" Tail: {tail}." if tail else ""
+        ctx.wake(
+            owner_thread, "jobs",
+            f"{f.name}: job {jid} FAILED (rc={b.get('rc')}, attempt {attempt}) and is in HOLD_ON_FAIL on "
+            f"{b.get('host', '?')}{left_s}. Control dir: {hdir}.{tail_s} Rescue in-place with "
+            f"`hpc-hold retry --dir {hdir} -- <cmd>`, extend once with `hpc-hold extend --dir {hdir}`, or "
+            f"free the slot with `hpc-hold release --dir {hdir}`.{report_hint(ctx, owner_thread, parent)}",
+            urgent=True,
+        )
+        alerted[hkey] = iso(ctx.now)
+        ctx.note(f"holds: {f.name} job {jid} attempt {attempt} in HOLD_ON_FAIL -> wake {owner_thread}")
 
 
 def parse_listing(out, norm):
@@ -1498,6 +1611,8 @@ def add_main(argv):
                     help="expected run time in minutes: wake once if a job still runs at twice that (a straggler)")
     ap.add_argument("--max-pend-h", type=float, default=None,
                     help="wake once if a job still pends this many hours after registration")
+    ap.add_argument("--hold-dir", default="",
+                    help="hpc-hold control directory (e.g. on shared scratch) to watch for HOLD_ON_FAIL beacons")
     args = ap.parse_args(argv)
     thread = args.thread.strip()
     if not thread or not THREAD_ID_RE.match(thread):
@@ -1507,6 +1622,10 @@ def add_main(argv):
         return 2
     if args.parent and not THREAD_ID_RE.match(args.parent):
         print(f"watch.py add: invalid --parent {args.parent!r}", file=sys.stderr)
+        return 2
+    hold_dir = args.hold_dir.strip()
+    if hold_dir and not SAFE_PATH_RE.match(hold_dir):
+        print(f"watch.py add: invalid --hold-dir {hold_dir!r}", file=sys.stderr)
         return 2
     for flag, v in (("--expect-min", args.expect_min), ("--max-pend-h", args.max_pend_h)):
         if v is not None and not v > 0:
@@ -1527,7 +1646,8 @@ def add_main(argv):
     data = {"thread": thread, "jobs": jobs, **({"parent": args.parent} if args.parent else {}),
             **({"next_step": args.next_step} if args.next_step else {}),
             **({"expect_min": args.expect_min} if args.expect_min else {}),
-            **({"max_pend_h": args.max_pend_h} if args.max_pend_h else {})}
+            **({"max_pend_h": args.max_pend_h} if args.max_pend_h else {}),
+            **({"hold_dir": hold_dir} if hold_dir else {})}
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
@@ -1649,6 +1769,93 @@ def lead_main(argv):
     return 0
 
 
+def check_holds_main(argv):
+    """`watch.py check-holds`: fast-poll only open job files that set hold_dir, waking urgently on HOLD_ON_FAIL.
+    Exits immediately with no SSH calls when no open job file sets hold_dir."""
+    ap = argparse.ArgumentParser(prog="watch.py check-holds", description=check_holds_main.__doc__)
+    ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
+    ap.add_argument("--verbose", "-v", action="store_true", help="print observations")
+    ap.add_argument("--now", help="pretend the time is this ISO time (tests)")
+    args = ap.parse_args(argv)
+    now = parse_iso(args.now) if args.now else datetime.now(UTC)
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(f"watcher: cannot read config: {e}", file=sys.stderr)
+        return 1
+    if not cfg or cfg.get("enabled") is False:
+        return 0
+    sec = cfg.get("jobs")
+    if sec is None or (isinstance(sec, dict) and sec.get("enabled") is False):
+        return 0
+    sdir = state_dir()
+    spath = sdir / "watch.json"
+
+    def open_hold_groups(state):
+        reported = (state.get("jobs") or {}).get("reported") or {}
+        groups = []
+        for f in job_files(Ctx(now, cfg, state, True, False)):
+            try:
+                st_f = f.stat()
+                key = f"{f}:{st_f.st_mtime_ns}"
+                if reported.get(key, {}).get("ended"):
+                    continue
+                if not job_hold_dir(f):
+                    continue
+                thread, jobs, next_step, parent = read_job_file(f)
+                groups.append((f, key, thread, jobs, next_step, st_f.st_mtime, parent))
+            except Exception:
+                continue
+        return groups
+
+    try:
+        peek = json.loads(spath.read_text(encoding="utf-8")) if spath.exists() else {}
+    except Exception:
+        peek = {}
+    if not open_hold_groups(peek):
+        if args.dry_run or args.verbose:
+            print("  holds: none open")
+        return 0
+
+    lock = None
+    if not args.dry_run:
+        sdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = open(sdir / "watch.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0
+    try:
+        state = json.loads(spath.read_text(encoding="utf-8")) if spath.exists() else {}
+    except Exception:
+        state = {}
+    groups = open_hold_groups(state)
+    if not groups:
+        return 0
+    ctx = Ctx(now, cfg, state, args.dry_run, args.verbose, baseline=False)
+    ctx.budget = float(cfg.get("db_budget_ms", 2000)) / 1000
+    ctx.deadline = time.monotonic() + ctx.budget
+    st = state.setdefault("jobs", {})
+    try:
+        check_hold_beacons(ctx, groups, st, baseline=False)
+    finally:
+        ctx.deadline = None
+        ctx.close()
+    ctx.deadline = time.monotonic() + ctx.budget
+    out = deliver(ctx)
+    ctx.close()
+    if args.dry_run or args.verbose:
+        for n in ctx.notes:
+            print(f"  {n}")
+    for line in out:
+        print(line)
+    if args.dry_run:
+        print("dry run: no state written, no wake sent")
+    else:
+        save_state(spath, state)
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["add"]:
@@ -1657,6 +1864,8 @@ def main(argv=None):
         return lead_main(argv[1:])
     if argv[:1] == ["pace"]:
         return pace_main(argv[1:])
+    if argv[:1] == ["check-holds"]:
+        return check_holds_main(argv[1:])
     ap = argparse.ArgumentParser(description="orchestack watcher: wake a chat only when something changed.")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
     ap.add_argument("--verbose", "-v", action="store_true", help="print every check's observations")

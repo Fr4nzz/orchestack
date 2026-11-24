@@ -95,6 +95,9 @@ This writes `~/.local/state/orchestack/jobs/4711.json`.
 
 - `--name` sets the name, `--dir` another directory, and `--force` replaces a file of that name.
 - `--expect-min N` and `--max-pend-h H` add the straggler and pending limits.
+- `--hold-dir PATH` registers an `hpc-hold` control directory on shared scratch so `watch.py check-holds` (run every
+  minute by `orchestack-hold.timer`, a no-op with zero SSH calls when no open job file sets `hold_dir`) wakes the
+  owner urgently when `beacon.json` enters `HOLD_ON_FAIL`. Remote clusters configure `jobs.hold_command` with `{dirs}`.
 - The thread comes from `$T3CODE_THREAD_ID`, which T3 sets in the shell of every chat, delegates included.
 - Outside a T3 shell, pass `--thread <id>`. The T3 tool `orchestrator_capabilities` returns the calling chat's
   own id as `parentThreadId` (the parent its delegates would get).

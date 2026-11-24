@@ -2367,3 +2367,77 @@ def test_pace_exits_1_when_no_account_is_read(tmp_path):
     rig.config(usage={"command": cmd, "weekly_reset": "Sun 12:00"})
     p = pace_run(rig, T0)
     assert p.returncode == 1 and "no weekly percentage read" in p.stdout
+
+
+# ---------- fail-hold beacons (hpc-hold + check-holds) ----------
+
+def test_check_holds_fast_noop_and_urgent_wake_per_attempt(tmp_path):
+    rig = Rig(tmp_path)
+    hold_dir = tmp_path / "hold"
+    hold_dir.mkdir()
+    marker = tmp_path / "called"
+    hold_cmd = rig.script("hc.py", f"import sys, pathlib; pathlib.Path({str(marker)!r}).write_text('1')\n"
+                                   "for d in sys.argv[1:]:\n"
+                                   "    p = pathlib.Path(d) / 'beacon.json'\n"
+                                   "    if p.exists(): print(d + '\\t' + p.read_text().replace('\\n', ' '))\n")
+    rig.config(jobs={"command": rig.script("b.py", "print('501 RUN')\n"),
+                     "hold_command": hold_cmd + ["{dirs}"]}, rate_limit_minutes=60)
+    # No hold_dir registered yet -> check-holds exits without calling hold_command.
+    p = rig.run(None, "check-holds", "--now", T0, "--verbose")
+    assert p.returncode == 0 and not marker.exists() and "holds: none open" in p.stdout
+    # Register a job with --hold-dir via watch.py add (and reject unsafe paths).
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(rig.tmp), "ORCHESTACK_STATE_DIR": str(rig.state_dir),
+           "T3CODE_THREAD_ID": "child-9"}
+    bad = subprocess.run([sys.executable, "-I", str(WATCH), "add", "--job", "501", "--hold-dir", "/tmp/a;rm"],
+                         capture_output=True, text=True, env=env, timeout=15)
+    assert bad.returncode == 2
+    ok = subprocess.run([sys.executable, "-I", str(WATCH), "add", "--job", "501", "--hold-dir", str(hold_dir)],
+                        capture_output=True, text=True, env=env, timeout=15)
+    assert ok.returncode == 0, ok.stderr
+    # Seed a recent wake on child-9 to verify HOLD_ON_FAIL wakes urgently (bypasses 60-min rate limit).
+    (rig.state_dir / "watch.json").write_text(json.dumps({"sent": {"child-9": at(-5)}, "initialised": ["jobs"]}))
+    # Expired hold is skipped.
+    (hold_dir / "beacon.json").write_text(json.dumps({
+        "status": "HOLD_ON_FAIL", "job_id": "501", "host": "gpu01", "attempt": 1, "rc": 1,
+        "hold_until": at(-1), "tail": "ImportError: nope", "dir": str(hold_dir),
+    }))
+    rig.run(None, "check-holds", "--now", T0)
+    assert marker.exists() and rig.wakes() == []
+    # Active hold wakes urgently once for attempt 1.
+    (hold_dir / "beacon.json").write_text(json.dumps({
+        "status": "HOLD_ON_FAIL", "job_id": "501", "host": "gpu01", "attempt": 1, "rc": 1,
+        "hold_until": at(4), "tail": "ImportError: nope", "dir": str(hold_dir),
+    }))
+    rig.run(None, "check-holds", "--now", T0)
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "child-9"
+    assert "HOLD_ON_FAIL on gpu01" in w[0]["text"] and "ImportError: nope" in w[0]["text"]
+    assert "hpc-hold retry --dir" in w[0]["text"]
+    # Same attempt never wakes twice.
+    rig.run(None, "check-holds", "--now", at(1))
+    assert rig.wakes() == []
+    # Second failed attempt wakes again.
+    (hold_dir / "beacon.json").write_text(json.dumps({
+        "status": "HOLD_ON_FAIL", "job_id": "501", "host": "gpu01", "attempt": 2, "rc": 2,
+        "hold_until": at(6), "tail": "KeyError: cfg", "dir": str(hold_dir),
+    }))
+    rig.run(None, "check-holds", "--now", at(2))
+    w2 = rig.wakes()
+    assert len(w2) == 1 and "attempt 2" in w2[0]["text"] and "KeyError: cfg" in w2[0]["text"]
+
+
+def test_check_holds_reads_local_beacon_without_hold_command(tmp_path):
+    rig = Rig(tmp_path)
+    hold_dir = tmp_path / "local_hold"
+    hold_dir.mkdir()
+    (hold_dir / "beacon.json").write_text(json.dumps({
+        "status": "HOLD_ON_FAIL", "job_id": "777", "host": "node1", "attempt": 1, "rc": 3,
+        "hold_until": at(5), "tail": "bad config", "dir": str(hold_dir),
+    }))
+    rig.config(jobs={"command": rig.script("b.py", "print('777 RUN')\n")})
+    jobs_dir = rig.state_dir / "jobs"
+    jobs_dir.mkdir(parents=True)
+    (jobs_dir / "777.json").write_text(json.dumps({"thread": "child-1", "jobs": ["777"], "hold_dir": str(hold_dir)}))
+    rig.run(None, "check-holds", "--now", T0)
+    w = rig.wakes()
+    assert len(w) == 1 and w[0]["thread"] == "child-1" and "bad config" in w[0]["text"]

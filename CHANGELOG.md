@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+- `watcher/watch.py` and `scripts/install.sh`: support `hpc-hold` fail-hold beacons via `watch.py add --hold-dir`,
+  `jobs.hold_command`, `watch.py check-holds`, and `orchestack-hold.timer` (1-minute fast check, zero-cost no-op when
+  no open job file sets `hold_dir`). Wakes the job owner urgently with rescue commands while `HOLD_ON_FAIL` is active.
 - `retro/scan.py`: also scan Antigravity transcripts (`~/.t3*/userdata/providers/antigravity/*/antigravity-acp/brain`
   and `~/.gemini/antigravity*/brain`, `transcript.jsonl` only), resolving workspaces from `conversation_summaries.db`,
   normalising `mcp_<server>_<tool>` and `call_mcp_tool` names, and catching non-zero backgrounded `run_command` exits.

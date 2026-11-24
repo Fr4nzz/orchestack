@@ -44,7 +44,7 @@ BACKUP="$BACKUP_BASE/$TS"
 SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 UNIT_DIR="$HOME/.config/systemd/user"
-UNITS=(orchestack-watch.service orchestack-watch.timer)
+UNITS=(orchestack-watch.service orchestack-watch.timer orchestack-hold.service orchestack-hold.timer)
 RETRO_UNITS=(orchestack-retro.service orchestack-retro.timer)
 LINE="Orchestrator or lead chats (told 'you are the orchestrator', or titled Orchestrator:/Lead:): load the \`orchestrator\` skill at start and again after every compaction."
 
@@ -124,8 +124,8 @@ PY
       say "removed the orchestack line from $CLAUDE_MD"
     fi
   fi
-  if [[ -f $UNIT_DIR/orchestack-watch.timer || -f $UNIT_DIR/orchestack-watch.service ]]; then
-    run systemctl --user disable --now orchestack-watch.timer
+  if [[ -f $UNIT_DIR/orchestack-watch.timer || -f $UNIT_DIR/orchestack-watch.service || -f $UNIT_DIR/orchestack-hold.timer || -f $UNIT_DIR/orchestack-hold.service ]]; then
+    run systemctl --user disable --now orchestack-watch.timer orchestack-hold.timer
     for u in "${UNITS[@]}"; do
       if [[ -f $UNIT_DIR/$u ]]; then run rm -f -- "$UNIT_DIR/$u"; say "removed $UNIT_DIR/$u"; fi
     done
@@ -180,13 +180,17 @@ if (( WATCHER )); then
   if (( DRY )); then
     say "  would write $UNIT_DIR/orchestack-watch.service (runs $REPO/watcher/watch.py)"
     say "  would write $UNIT_DIR/orchestack-watch.timer (every 15 min)"
+    say "  would write $UNIT_DIR/orchestack-hold.service (runs $REPO/watcher/watch.py check-holds)"
+    say "  would write $UNIT_DIR/orchestack-hold.timer (every 1 min, no-op without hold_dir)"
   else
     sed "s|@REPO@|$REPO|g" "$REPO/watcher/orchestack-watch.service" > "$UNIT_DIR/orchestack-watch.service"
     cp -- "$REPO/watcher/orchestack-watch.timer" "$UNIT_DIR/orchestack-watch.timer"
-    say "wrote $UNIT_DIR/orchestack-watch.{service,timer}"
+    sed "s|@REPO@|$REPO|g" "$REPO/watcher/orchestack-hold.service" > "$UNIT_DIR/orchestack-hold.service"
+    cp -- "$REPO/watcher/orchestack-hold.timer" "$UNIT_DIR/orchestack-hold.timer"
+    say "wrote $UNIT_DIR/orchestack-watch.{service,timer} and orchestack-hold.{service,timer}"
   fi
   run systemctl --user daemon-reload
-  run systemctl --user enable --now orchestack-watch.timer
+  run systemctl --user enable --now orchestack-watch.timer orchestack-hold.timer
   if ! python3 -I -c 'import json,os,sys; p=os.path.expanduser("~/.config/orchestack/config.json"); sys.exit(0 if "watcher" in json.load(open(p)) else 1)' 2>/dev/null; then
     say "note: config.json has no watcher section yet, so each run does nothing (see examples/config.example.json)"
   fi

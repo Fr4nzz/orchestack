@@ -1,0 +1,13 @@
+# orchestack fail-hold watcher: fast check for active hpc-hold beacons.
+# scripts/install.sh --watcher writes this to ~/.config/systemd/user/ with @REPO@ replaced.
+# Started every minute by orchestack-hold.timer; exits immediately with no SSH calls when no open job file sets hold_dir.
+[Unit]
+Description=orchestack fail-hold check (wakes owner when a batch job enters HOLD_ON_FAIL)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env python3 -I @REPO@/watcher/watch.py check-holds
+Nice=10
+TimeoutStartSec=90
+UMask=0077
