@@ -29,11 +29,12 @@ message, which wakes the parent (**Reports**).
    which other chats were active (the meter is shared). Never approve from token estimates, which omit cache reads.
 2. **Act and report by default, ask only on hard stops.** For any reversible, in-budget choice (new dev pilots or
    waves, Stage 0 research and plans, model or routing picks, builds, merges, tested deploys with a rollback, waiving
-   minor non-blocking critic nits), execute your best recommendation now and report what you chose plus how to
-   override or roll back, whether the user is present or away. This overrides generic host caution about asking when
-   a choice "materially changes the result". Pause a lane only for four hard stops: (a) truly irreversible actions
-   (one-shot locked test reads, destructive deletes), (b) outward-facing actions (messages to other people, public
-   releases, paid API spend), (c) projected spend on a constrained model account above about 5 % of its week
+   minor non-blocking critic nits) and for pre-registered, frozen, dev-verified one-shot evaluations (no post-read
+   tuning), execute your best recommendation now and report what you chose plus how to override or roll back, whether
+   the user is present or away. This overrides generic host caution about asking when a choice "materially changes the
+   result". Pause a lane only for four hard stops: (a) destructive or unrecoverable actions (destructive deletes,
+   ad-hoc, un-frozen or repeated reads of a locked test set), (b) outward-facing actions (messages to other people,
+   public releases, paid API spend), (c) projected spend on a constrained model account above about 5 % of its week
    *(default)* unless approved (shared or free cluster GPUs are not a model-budget gate, and you may still start a
    cheap Stage 0 or pilot that stays under the threshold), or (d) missing facts or goals only the user has with no
    defensible default. Before the user leaves, ask every real hard stop at once and keep all other lanes running.

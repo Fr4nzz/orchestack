@@ -4,9 +4,10 @@
 
 - `skills/orchestrator`: replace soft autonomy wording with an explicit Act-and-Report vs Hard-Stop gate (rule 2,
   end-of-reply check, and `NEEDS_YOU.md` admission self-check). Orchestrators now execute reversible, in-budget
-  recommendations (dev pilots, Stage 0 plans, routing/model picks, builds, roll-backable deploys) without pausing for
-  confirmation, and reserve `NEEDS_YOU.md` strictly for genuine hard stops (irreversible actions, outward-facing
-  actions, over-threshold model spend, or missing user-only facts).
+  recommendations (dev pilots, Stage 0 plans, routing/model picks, builds, roll-backable deploys) and pre-registered,
+  frozen, dev-verified one-shot evaluations (no post-read tuning) without pausing for confirmation, and reserve
+  `NEEDS_YOU.md` strictly for genuine hard stops (destructive deletes, ad-hoc or repeated locked-test reads,
+  outward-facing actions, over-threshold model spend, or missing user-only facts).
 - `watcher/watch.py` and `scripts/install.sh`: support `hpc-hold` fail-hold beacons via `watch.py add --hold-dir`,
   `jobs.hold_command`, `watch.py check-holds`, and `orchestack-hold.timer` (1-minute fast check, zero-cost no-op when
   no open job file sets `hold_dir`). Wakes the job owner urgently with rescue commands while `HOLD_ON_FAIL` is active.
