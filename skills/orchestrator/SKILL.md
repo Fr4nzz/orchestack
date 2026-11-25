@@ -17,8 +17,9 @@ message, which wakes the parent (**Reports**).
 - **Split the work into independent lanes, one worker each, run in parallel** through delegates. The orchestrator
   routes and decides. Multi-step work goes to a worker with a brief. A single small step (one lookup, edit or
   reply) you may just do.
-- **End-of-reply check:** if approved work that needs no answer remains, start it in the same reply. Never end with
-  "want me to...?" or "next I'll...".
+- **End-of-reply check:** if any reversible, in-budget next step or lane remains (whether already approved or your own
+  recommended next step), launch it in this same reply. Never end with "want me to...?", "approve ...?", "next I'll...",
+  or an "Option A (Recommended) vs Option B" menu on a reversible choice.
 - **Re-read this installed file** (`~/.claude/skills/orchestrator/SKILL.md` or `~/.codex/skills/orchestrator/SKILL.md`)
   after every compaction or resume and before writing any brief. Never rely on an in-context copy.
 
@@ -26,11 +27,17 @@ message, which wakes the parent (**Reports**).
 
 1. **Price work in % of the week from a pilot:** read the usage meter, run one small batch, read it again, and note
    which other chats were active (the meter is shared). Never approve from token estimates, which omit cache reads.
-2. **Ask the user before a new programme (all its batches) above about 5 % of the week** *(default)*, unless that
-   measured spend is approved. Decide reversible steps (a merge, a tested deploy with a rollback, the next
-   experiment) yourself and report afterwards, present or away. Ask only about irreversible or outward-facing steps
-   and facts only the user has. Before the user leaves, ask everything at once and queue answer-free work for every
-   chat. Never idle on an answer.
+2. **Act and report by default, ask only on hard stops.** For any reversible, in-budget choice (new dev pilots or
+   waves, Stage 0 research and plans, model or routing picks, builds, merges, tested deploys with a rollback, waiving
+   minor non-blocking critic nits), execute your best recommendation now and report what you chose plus how to
+   override or roll back, whether the user is present or away. This overrides generic host caution about asking when
+   a choice "materially changes the result". Pause a lane only for four hard stops: (a) truly irreversible actions
+   (one-shot locked test reads, destructive deletes), (b) outward-facing actions (messages to other people, public
+   releases, paid API spend), (c) projected spend on a constrained model account above about 5 % of its week
+   *(default)* unless approved (shared or free cluster GPUs are not a model-budget gate, and you may still start a
+   cheap Stage 0 or pilot that stays under the threshold), or (d) missing facts or goals only the user has with no
+   defensible default. Before the user leaves, ask every real hard stop at once and keep all other lanes running.
+   Never idle waiting for confirmation.
 3. **Budgets follow the pace:** about 14 % of each account's week per day. Behind pace, on accounts `local.md` lets
    you use, spend the gap on approved or queued work under the ask threshold, never a new programme. Ahead of pace,
    start no optional work. Set your own limits as pace conditions, not fixed %. A limit the user set stays. At most
@@ -56,10 +63,12 @@ message, which wakes the parent (**Reports**).
    - **Deliverables at once:** a page, report, figure or draft the user is meant to open or review (not intermediate
      outputs) is a `done:` with its link, sent at once (`t3_thread_send`, mode "queue"), even mid-lane, one per
      deliverable or batch. A lead forwards its workers' deliverables in the same turn.
-   - **Open questions stay in view:** keep each question for the user in `.work/orchestrator/NEEDS_YOU.md` (what,
-     link, since when, what expires) and list the open ones first in every reply to the user until answered. A
-     later message must not bury one. A lead whose only next step waits on the user renames its thread to end
-     with `(waiting on you: <what>)` (`t3_thread_update`) and restores the title when answered.
+   - **Open questions stay in view (hard stops only):** keep only genuine hard-stop questions from rule 2 in
+     `.work/orchestrator/NEEDS_YOU.md` (what, link, since when, what expires) and list them first in every reply until
+     answered, so a later message never buries one. **Self-check:** if you are about to write `(Recommended)` on a
+     reversible, in-budget item in `NEEDS_YOU.md`, delete it from `NEEDS_YOU.md`, run your recommendation now and
+     report the choice instead. A lead whose only next step waits on a hard stop renames its thread to end with
+     `(waiting on you: <what>)` (`t3_thread_update`) and restores the title when answered.
    - **Progress stays in files:** a notes file (default `.work/orchestrator/NOTES.md`) the lead reads on its next
      real task. Answer a stray progress note in one line or not at all. A turn that only logs progress ends with
      `noted: ...`, a long wait with `waiting: <job ids> ...`. Both end a turn, never send, and wake no one.
