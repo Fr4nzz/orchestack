@@ -2,6 +2,10 @@
 
 ## 0.2.0 (unreleased)
 
+- `watcher/watch.py`: add opt-in `codex_auto_reset` check and `watch.py codex-reset` subcommand to redeem a banked
+  Codex reset credit via `codex app-server` (`account/rateLimitResetCredit/consume`) when weekly usage reaches 100 %
+  (0 % remaining) with at least `min_hours_to_reset` (24 h) before normal renewal, persisting the idempotency key
+  before redemption, clearing stale usage cache, and waking `notify_threads` urgently.
 - `skills/orchestrator`: add a plain-language user-reply rule under Reports (rule 7) so orchestrators and leads name
   experiments, splits, drafts, comments and commits in plain words instead of internal run codes, comment IDs or raw
   git commit hashes, keeping internal IDs in logs and state files.

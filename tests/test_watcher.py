@@ -2441,3 +2441,131 @@ def test_check_holds_reads_local_beacon_without_hold_command(tmp_path):
     rig.run(None, "check-holds", "--now", T0)
     w = rig.wakes()
     assert len(w) == 1 and w[0]["thread"] == "child-1" and "bad config" in w[0]["text"]
+
+
+def _fake_codex_script(rig, state_file):
+    path = rig.tmp / "fake_codex.py"
+    path.write_text(
+        f"""#!{sys.executable}
+import json, sys
+from pathlib import Path
+st_path = Path({str(state_file)!r})
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({{"id": mid, "result": {{"userAgent": "fake-codex"}}}}), flush=True)
+    elif method == "initialized":
+        continue
+    elif method == "account/rateLimits/read":
+        cfg = json.loads(st_path.read_text())
+        print(json.dumps({{"id": mid, "result": {{
+            "rateLimits": {{"limitId": "codex", "secondary": {{
+                "usedPercent": cfg["used"], "windowDurationMins": 10080, "resetsAt": cfg["resets_at"]
+            }}}},
+            "rateLimitResetCredits": {{"availableCount": cfg["credits"]}},
+        }}}}), flush=True)
+    elif method == "account/rateLimitResetCredit/consume":
+        cfg = json.loads(st_path.read_text())
+        cfg.setdefault("consume_keys", []).append(msg["params"]["idempotencyKey"])
+        st_path.write_text(json.dumps(cfg))
+        if cfg.get("fail_consume"):
+            print(json.dumps({{"id": mid, "error": {{"code": -32000, "message": "temporary error"}}}}), flush=True)
+        else:
+            print(json.dumps({{"id": mid, "result": {{"outcome": cfg.get("outcome", "reset")}}}}), flush=True)
+"""
+    )
+    os.chmod(path, 0o700)
+    return str(path)
+
+
+def test_codex_auto_reset_guards_and_redemption(tmp_path):
+    rig = Rig(tmp_path)
+    st_file = tmp_path / "codex_mock.json"
+    fake = _fake_codex_script(rig, st_file)
+    cache_file = tmp_path / "codex_cache.json"
+    cache_file.write_text("{}")
+    t0_epoch = int(parse_ts(T0))
+    rig.config(
+        codex_auto_reset={
+            "enabled": True,
+            "binary": fake,
+            "min_used_percent": 100.0,
+            "min_hours_to_reset": 24.0,
+            "notify_threads": ["orch-1", "orch-2"],
+            "clear_cache": str(cache_file),
+        }
+    )
+    # 1. Below 100 % -> does not redeem.
+    st_file.write_text(json.dumps({"used": 97, "credits": 1, "resets_at": t0_epoch + 70 * 3600}))
+    rig.run(None, "codex-reset", "--now", T0)
+    assert json.loads(st_file.read_text()).get("consume_keys", []) == []
+    assert rig.wakes() == [] and cache_file.exists()
+
+    # 2. At 100 %, but normal renewal < 24 h away -> skips to avoid wasting the credit.
+    st_file.write_text(json.dumps({"used": 100, "credits": 1, "resets_at": t0_epoch + 12 * 3600}))
+    rig.run(None, "codex-reset", "--now", T0)
+    assert json.loads(st_file.read_text()).get("consume_keys", []) == []
+    assert rig.wakes() == []
+
+    # 3. At 100 %, > 24 h away, but 0 banked credits -> skips.
+    st_file.write_text(json.dumps({"used": 100, "credits": 0, "resets_at": t0_epoch + 70 * 3600}))
+    rig.run(None, "codex-reset", "--now", T0)
+    assert json.loads(st_file.read_text()).get("consume_keys", []) == []
+    assert rig.wakes() == []
+
+    # 4. Dry-run when eligible -> does not consume or wake.
+    st_file.write_text(json.dumps({"used": 100, "credits": 1, "resets_at": t0_epoch + 70 * 3600}))
+    out = rig.run(None, "codex-reset", "--dry-run", "--now", T0)
+    assert "WOULD redeem" in out.stdout
+    assert json.loads(st_file.read_text()).get("consume_keys", []) == []
+    assert rig.wakes() == []
+
+    # 5. Live run when eligible -> redeems once, clears cache, wakes both notify threads urgently.
+    rig.run(None, "codex-reset", "--now", T0)
+    keys = json.loads(st_file.read_text()).get("consume_keys", [])
+    assert len(keys) == 1
+    assert not cache_file.exists()
+    w = rig.wakes()
+    assert {x["thread"] for x in w} == {"orch-1", "orch-2"}
+    assert all("Codex banked weekly reset was applied automatically" in x["text"] for x in w)
+    saved = rig.state()
+    assert "pending_idempotency_key" not in saved["codex_auto_reset"]
+    assert saved["codex_auto_reset"]["last_outcome"] == "reset"
+
+
+def test_codex_auto_reset_reuses_idempotency_key_on_retry(tmp_path):
+    rig = Rig(tmp_path)
+    st_file = tmp_path / "codex_mock.json"
+    fake = _fake_codex_script(rig, st_file)
+    t0_epoch = int(parse_ts(T0))
+    rig.config(
+        codex_auto_reset={
+            "enabled": True,
+            "binary": fake,
+            "min_used_percent": 100.0,
+            "min_hours_to_reset": 24.0,
+            "notify_threads": ["orch-1"],
+        }
+    )
+    # First attempt fails transiently during consume -> pending key stays persisted on disk.
+    st_file.write_text(json.dumps({"used": 100, "credits": 1, "resets_at": t0_epoch + 70 * 3600, "fail_consume": True}))
+    p = rig.run(None, "codex-reset", "--now", T0, check=False)
+    assert p.returncode == 1
+    saved = rig.state()
+    first_key = saved["codex_auto_reset"]["pending_idempotency_key"]
+    assert first_key and rig.wakes() == []
+
+    # Second attempt succeeds and reuses the exact same idempotency key, then clears it.
+    st_file.write_text(json.dumps({"used": 100, "credits": 1, "resets_at": t0_epoch + 70 * 3600, "fail_consume": False,
+                                   "consume_keys": json.loads(st_file.read_text())["consume_keys"]}))
+    rig.run(None, "codex-reset", "--now", at(1))
+    keys = json.loads(st_file.read_text())["consume_keys"]
+    assert len(keys) == 2 and keys[0] == keys[1] == first_key
+    saved2 = rig.state()
+    assert "pending_idempotency_key" not in saved2["codex_auto_reset"]
+    assert len(rig.wakes()) == 1

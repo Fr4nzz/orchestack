@@ -22,6 +22,11 @@ owns it. The same state never wakes anyone twice.
   expiry    a login (e.g. tsh) has less than warn_minutes left or is gone, while a job file is open -> the owner
             of the oldest open job file, once per expiry (urgent, opt-in)
   hosts     a host came online -> run its copy command (no wake)
+  codex_auto_reset
+            opt-in (`enabled: true`): when Codex weekly usage hits 100 % (0 % left) with at least
+            min_hours_to_reset (24) hours before normal renewal and a banked credit is available, redeem it via
+            `codex app-server` (`account/rateLimitResetCredit/consume`) with a persisted idempotency key and wake
+            notify_threads urgently
 
 Wakes go through the T3 CLI (`t3 thread send <thread> -`) or, for a thread that has one, a scheduled-task webhook
 URL. At most one wake per thread per hour (disk and failures excepted). Wakes held by that limit or by quiet hours
@@ -35,6 +40,8 @@ stay in an outbox and go out merged with later ones.
   watch.py lead --thread LEAD [--parent ID] [--remove]
            (registers a t3_thread_launch child's parent, which T3 does not record; the parent defaults to
            $T3CODE_THREAD_ID, so the orchestrator runs it right after the launch)
+  watch.py codex-reset [--dry-run] [--verbose] [--now ISO-TIME]
+           (run only the guarded codex_auto_reset check immediately, sharing watch.lock and watch.json)
 
 --dry-run prints what it would do and changes nothing (no state written, no wake sent, no command run except the
 read-only checks). Config: the "watcher" section of config.json in $ORCHESTACK_CONFIG_DIR or ~/.config/orchestack.
@@ -50,6 +57,7 @@ import glob
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import sqlite3
@@ -58,6 +66,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -280,6 +289,7 @@ class Ctx:
         self.notes = []
         self._db = None
         self.work, self.first, self.deadline, self.budget = {}, False, None, 2.0
+        self.state_path = None
         self.tz = tzinfo(cfg.get("timezone"))
 
     def section(self, name):
@@ -1445,8 +1455,169 @@ def check_hosts(ctx):
             ctx.note(f"hosts: {name} {st[name]}")
 
 
+CODEX_SETTLED_OUTCOMES = frozenset({"reset", "nothingToReset", "noCredit", "alreadyRedeemed"})
+
+
+def codex_app_server_rpc(method, params=None, binary="codex", codex_home=None, timeout_s=25.0):
+    """Run one JSON-RPC request against `codex app-server --listen stdio://` and return its result dict."""
+    exe = os.path.expanduser(str(binary)) if binary else "codex"
+    if os.sep not in exe:
+        found = shutil.which(exe)
+        if not found:
+            cand = os.path.expanduser(f"~/.local/bin/{exe}")
+            if os.path.exists(cand):
+                found = cand
+        exe = found or exe
+    env = dict(os.environ)
+    if codex_home:
+        env["CODEX_HOME"] = os.path.expanduser(str(codex_home))
+    proc = subprocess.Popen(
+        [exe, "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env,
+    )
+    deadline = time.monotonic() + float(timeout_s)
+
+    def send(obj):
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def recv(target_id):
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"codex app-server timed out waiting for {method}")
+            ready, _, _ = select.select([proc.stdout], [], [], left)
+            if not ready:
+                raise TimeoutError(f"codex app-server timed out waiting for {method}")
+            line = proc.stdout.readline()
+            if not line:
+                err = (proc.stderr.read() or "").strip()
+                raise RuntimeError(f"codex app-server exited before replying to {method}: {short(err, 120)}")
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("id") == target_id:
+                if "error" in msg and msg["error"] is not None:
+                    raise RuntimeError(f"codex app-server {method} error: {msg['error']}")
+                return msg.get("result")
+
+    try:
+        send({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "orchestack-watcher", "version": "0.2.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        recv(1)
+        send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params if params is not None else {}})
+        return recv(2)
+    finally:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if pipe:
+                    pipe.close()
+            except OSError:
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def check_codex_auto_reset(ctx):
+    """Redeem a banked Codex reset credit when weekly usage is exhausted and renewal is still far away."""
+    sec = ctx.section("codex_auto_reset")
+    st, _ = ctx.check_state("codex_auto_reset")
+    if sec.get("enabled") is not True:
+        ctx.note("codex_auto_reset: disabled")
+        return
+    binary = sec.get("binary", "codex")
+    codex_home = sec.get("codex_home")
+    timeout_s = float(sec.get("timeout_s", 25))
+    min_used = float(sec.get("min_used_percent", 100.0))
+    min_hours = float(sec.get("min_hours_to_reset", 24.0))
+    res = codex_app_server_rpc("account/rateLimits/read", {}, binary=binary, codex_home=codex_home, timeout_s=timeout_s)
+    if not isinstance(res, dict):
+        raise RuntimeError("unexpected empty response from account/rateLimits/read")
+    by_id = res.get("rateLimitsByLimitId") or {}
+    snap = by_id.get("codex") or res.get("rateLimits") or {}
+    weekly = snap.get("secondary") or {}
+    used_pct = weekly.get("usedPercent")
+    if used_pct is None:
+        raise RuntimeError("codex weekly rate limit window missing")
+    used_pct = float(used_pct)
+    resets_at = weekly.get("resetsAt")
+    hours_left = (float(resets_at) - ctx.now.timestamp()) / 3600.0 if resets_at is not None else None
+    avail = int(((res.get("rateLimitResetCredits") or {}).get("availableCount")) or 0)
+    st["last_checked_at"] = iso(ctx.now)
+    st["last_used_percent"] = used_pct
+    st["last_available_credits"] = avail
+    st["last_resets_at"] = int(resets_at) if resets_at is not None else None
+    if used_pct < min_used:
+        ctx.note(f"codex_auto_reset: weekly {used_pct:.0f} % used ({max(0.0, 100.0 - used_pct):.0f} % left), "
+                 f"{avail} banked credit(s); waiting for {min_used:.0f} %")
+        return
+    if avail < 1:
+        ctx.note(f"codex_auto_reset: weekly {used_pct:.0f} % used, no banked reset credits available")
+        return
+    if hours_left is not None and hours_left < min_hours:
+        ctx.note(f"codex_auto_reset: weekly {used_pct:.0f} % used, normal renewal in {hours_left:.1f} h "
+                 f"(< {min_hours:g} h); skipping banked reset")
+        return
+    if ctx.dry:
+        hrs = f"{hours_left:.1f} h" if hours_left is not None else "unknown h"
+        ctx.note(f"codex_auto_reset: WOULD redeem banked reset (weekly {used_pct:.0f} % used, {hrs} to normal renewal, "
+                 f"{avail} credit(s) available)")
+        return
+    key = st.get("pending_idempotency_key") or str(uuid.uuid4())
+    st["pending_idempotency_key"] = key
+    # Persist the idempotency key before calling consume so a timeout or crash retries the same redemption.
+    ctx.state["codex_auto_reset"] = copy.deepcopy(st)
+    if ctx.state_path:
+        save_state(ctx.state_path, ctx.state)
+    resp = codex_app_server_rpc("account/rateLimitResetCredit/consume", {"idempotencyKey": key},
+                                binary=binary, codex_home=codex_home, timeout_s=timeout_s)
+    outcome = str((resp or {}).get("outcome") or "")
+    if outcome in CODEX_SETTLED_OUTCOMES:
+        st.pop("pending_idempotency_key", None)
+    st["last_outcome"] = outcome
+    st["last_attempt_at"] = iso(ctx.now)
+    if outcome != "reset":
+        ctx.note(f"codex_auto_reset: consume returned {outcome or 'unknown'} (weekly {used_pct:.0f} % used)")
+        return
+    remaining = max(0, avail - 1)
+    st["last_reset_at"] = iso(ctx.now)
+    st["last_reset_credits_remaining"] = remaining
+    cache_path = sec.get("clear_cache")
+    if cache_path:
+        try:
+            os.unlink(os.path.expanduser(str(cache_path)))
+        except OSError:
+            pass
+    targets = sec.get("notify_threads")
+    if isinstance(targets, str):
+        targets = [targets]
+    elif not targets:
+        targets = [ctx.orchestrator] if ctx.orchestrator else []
+    msg = (f"info: Codex banked weekly reset was applied automatically (weekly usage had reached {used_pct:.0f} %, "
+           f"{remaining} banked reset credit(s) remaining). You can continue using Codex (GPT Sol) now.")
+    for tid in dict.fromkeys(t for t in targets if t):
+        ctx.wake(tid, "codex_auto_reset", "", urgent=True, line=msg)
+    ctx.note(f"codex_auto_reset: redeemed banked reset (was {used_pct:.0f} % used, {remaining} credit(s) remaining)")
+
+
 CHECKS = (("jobs", check_jobs), ("children", check_children), ("disk", check_disk), ("usage", check_usage),
-          ("decision", check_decision), ("expiry", check_expiry), ("hosts", check_hosts))
+          ("decision", check_decision), ("expiry", check_expiry), ("hosts", check_hosts),
+          ("codex_auto_reset", check_codex_auto_reset))
 
 
 # ---------- delivery ----------
@@ -1856,6 +2027,61 @@ def check_holds_main(argv):
     return 0
 
 
+def codex_reset_main(argv):
+    """Run only the guarded codex_auto_reset check right away, sharing watch.lock and watch.json."""
+    ap = argparse.ArgumentParser(prog="watch.py codex-reset",
+                                 description="Check Codex weekly usage and redeem a banked reset if guards pass.")
+    ap.add_argument("--dry-run", action="store_true", help="check and print without redeeming or notifying")
+    ap.add_argument("--verbose", "-v", action="store_true", help="print check notes")
+    ap.add_argument("--now", help="pretend the time is this ISO time (tests)")
+    args = ap.parse_args(argv)
+    now = parse_iso(args.now) if args.now else datetime.now(UTC)
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(f"watcher: cannot read config: {e}", file=sys.stderr)
+        return 1
+    if not cfg or cfg.get("enabled") is False:
+        return 0
+    sdir = state_dir()
+    spath = sdir / "watch.json"
+    lock = None
+    if not args.dry_run:
+        sdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = open(sdir / "watch.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("watcher: another run is still going, skipped")
+            return 0
+    try:
+        state = json.loads(spath.read_text(encoding="utf-8")) if spath.exists() else {}
+    except Exception:
+        state = {}
+    ctx = Ctx(now, cfg, state, args.dry_run, args.verbose, baseline=False)
+    ctx.state_path = None if args.dry_run else spath
+    ctx.work = copy.deepcopy(state.get("codex_auto_reset") or {})
+    ctx.budget = float(cfg.get("db_budget_ms", 2000)) / 1000
+    try:
+        check_codex_auto_reset(ctx)
+    except Exception as e:
+        print(f"watcher: codex_auto_reset: error: {short(e, 160)}", file=sys.stderr)
+        return 1
+    state["codex_auto_reset"] = ctx.work
+    ctx.deadline = time.monotonic() + ctx.budget
+    out = deliver(ctx)
+    ctx.close()
+    for n in ctx.notes:
+        print(f"  {n}")
+    for line in out:
+        print(line)
+    if args.dry_run:
+        print("dry run: no state written, no wake sent")
+    else:
+        save_state(spath, state)
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["add"]:
@@ -1866,6 +2092,8 @@ def main(argv=None):
         return pace_main(argv[1:])
     if argv[:1] == ["check-holds"]:
         return check_holds_main(argv[1:])
+    if argv[:1] == ["codex-reset"]:
+        return codex_reset_main(argv[1:])
     ap = argparse.ArgumentParser(description="orchestack watcher: wake a chat only when something changed.")
     ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
     ap.add_argument("--verbose", "-v", action="store_true", help="print every check's observations")
@@ -1899,6 +2127,7 @@ def main(argv=None):
         print(f"watcher: state unreadable ({e}), starting fresh", file=sys.stderr)
         state = {}
     ctx = Ctx(now, cfg, state, args.dry_run, args.verbose, baseline=not args.no_baseline)
+    ctx.state_path = None if args.dry_run else spath
     if "initialised" not in state:  # state from before this field: checks with state count as initialised
         state["initialised"] = [n for n, _ in CHECKS if n in state]
     initialised = state["initialised"]
