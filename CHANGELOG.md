@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+- `skills/orchestrator`: add a plain-language user-reply rule under Reports (rule 7) so orchestrators and leads name
+  experiments, splits, drafts, comments and commits in plain words instead of internal run codes, comment IDs or raw
+  git commit hashes, keeping internal IDs in logs and state files.
 - `skills/orchestrator`: replace soft autonomy wording with an explicit Act-and-Report vs Hard-Stop gate (rule 2,
   end-of-reply check, and `NEEDS_YOU.md` admission self-check). Orchestrators now execute reversible, in-budget
   recommendations (dev pilots, Stage 0 plans, routing/model picks, builds, roll-backable deploys) and pre-registered,

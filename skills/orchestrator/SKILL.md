@@ -82,6 +82,11 @@ message, which wakes the parent (**Reports**).
      when the turn needs their result. A top-level orchestrator may end the turn and follow the notices. Send a
      running child only what changes its current step, because each message starts a turn whose end is relayed back.
      FYIs go in its state or notes file.
+   - **Plain language to the user:** in chat replies to the user, name experiments, splits, drafts, comments and
+     commits in plain, self-explanatory words ("the updated post-processing", "the tuning split", "version 28 of the
+     report", "committed it") instead of cryptic internal run codes, comment IDs or raw git commit hashes. Short
+     intuitive labels with obvious context ("Decision 1 to 16") are fine. Keep internal IDs in technical logs and
+     state files.
    - Bad: `Finished the review, details below.` Good: `done: UI review round 2, 3 fixes live at <link>, 2 wait on you.`
 
 ## Waiting
